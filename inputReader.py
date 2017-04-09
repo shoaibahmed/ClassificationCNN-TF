@@ -108,7 +108,7 @@ class InputReader:
 	def resetTestBatchIndex(self):
 		self.currentIndexTest = 0
 
-	def getTestBatch(self):
+	def getTestBatch(self, extendDim=False):
 		"""Returns testing images and labels in batch
 		Args:
 		  None
@@ -122,7 +122,7 @@ class InputReader:
 		if self.options.randomFetchTest:
 			self.indices = np.random.choice(self.totalImagesTest, self.options.batchSize)
 			imagesBatch = self.readImagesFromDisk([self.imageListTest[index] for index in self.indices])
-			labelsBatch = self.convertLabelsToOneHot([self.labelList[index] for index in self.indices])
+			labelsBatch = self.convertLabelsToOneHot([self.labelList[index] for index in self.indices], extendDim=extendDim)
 			
 		else:
 			endIndex = self.currentIndexTest + self.options.batchSize
@@ -130,7 +130,7 @@ class InputReader:
 				endIndex = self.totalImagesTest
 			self.indices = np.arange(self.currentIndexTest, endIndex)
 			imagesBatch = self.readImagesFromDisk([self.imageListTest[index] for index in self.indices])
-			labelsBatch = self.convertLabelsToOneHot([self.labelListTest[index] for index in self.indices])
+			labelsBatch = self.convertLabelsToOneHot([self.labelListTest[index] for index in self.indices], extendDim=extendDim)
 			self.currentIndexTest = endIndex
 
 		return imagesBatch, labelsBatch
@@ -146,10 +146,14 @@ class InputReader:
 		self.totalEpochs = processedImages / self.totalImages
 		self.currentIndex = processedImages % self.totalImages
 
-	def convertLabelsToOneHot(self, labels):
+	def convertLabelsToOneHot(self, labels, extendDim=False):
 		oneHotLabels = []
+		numElements = self.options.numClasses
+		if extendDim:
+				numElements += 1
+
 		for label in labels:
-			oneHotVector = np.zeros(self.options.numClasses)
+			oneHotVector = np.zeros(numElements)
 			oneHotVector[label] = 1
 			oneHotLabels.append(oneHotVector)
 		

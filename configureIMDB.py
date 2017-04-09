@@ -8,7 +8,7 @@ from optparse import OptionParser
 def traverseDirectory(options):
 	imagesFileTrain = open(options.imagesTrainOutputFile, 'w')
 	imagesFileTest = open(options.imagesTestOutputFile, 'w')
-	classes = {}
+	classes = {"edeka": 0, "jysk": 1, "meinladen": 2, "netto": 3, "post": 4, "saturn": 5, "other": 6}
 
 	# Extract class name
 	if os.name == 'nt':

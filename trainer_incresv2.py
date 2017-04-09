@@ -70,23 +70,27 @@ inputReader = inputReader.InputReader(options)
 if options.trainModel:
 	with tf.variable_scope('Model'):
 		# Data placeholders
-		inputBatchImages = tf.placeholder(dtype=tf.float32, shape=[None, options.imageHeight, 
+		inputBatchImages = tf.placeholder(dtype=tf.float32, shape=[None, options.imageHeight,
 											options.imageWidth, options.imageChannels], name="inputBatchImages")
 		inputBatchLabels = tf.placeholder(dtype=tf.float32, shape=[None, options.numClasses], name="inputBatchLabels")
 		inputKeepProbability = tf.placeholder(dtype=tf.float32, name="inputKeepProbability")
 
 		scaledInputBatchImages = tf.scalar_mul((1.0/255), inputBatchImages)
-		scaledInputBatchImages = tf.sub(scaledInputBatchImages, 0.5)
-		scaledInputBatchImages = tf.mul(scaledInputBatchImages, 2.0)
+		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
+		scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
 
 	# Create model
 	arg_scope = inception_resnet_v2_arg_scope()
 	with slim.arg_scope(arg_scope):
 		logits, end_points = inception_resnet_v2(scaledInputBatchImages, inputKeepProbability, options.numClasses, is_training=True)
 
+	# Create list of vars to restore before train op
+	variables_to_restore = slim.get_variables_to_restore(include=["InceptionResnetV2"])
+
 	with tf.name_scope('Loss'):
 		# Define loss
-		cross_entropy_loss = slim.losses.softmax_cross_entropy(logits, inputBatchLabels)
+		# Reversed from slim.losses.softmax_cross_entropy(logits, labels) => tf.losses.softmax_cross_entropy(labels, logits)
+		cross_entropy_loss = tf.losses.softmax_cross_entropy(inputBatchLabels, logits)
 		# loss = tf.reduce_sum(slim.losses.get_regularization_losses()) + cross_entropy_loss
 
 		tf.add_to_collection('losses', cross_entropy_loss)
@@ -113,17 +117,17 @@ if options.trainModel:
 
 	if options.tensorboardVisualization:
 		# Create a summary to monitor cost tensor
-		tf.scalar_summary("loss", loss)
+		tf.summary.scalar("loss", loss)
 
 		# Create summaries to visualize weights
 		for var in tf.trainable_variables():
-		    tf.histogram_summary(var.name, var)
+		    tf.summary.histogram(var.name, var)
 		# Summarize all gradients
 		for grad, var in gradients:
-		    tf.histogram_summary(var.name + '/gradient', grad)
+		    tf.summary.histogram(var.name + '/gradient', grad)
 
 		# Merge all summaries into a single op
-		mergedSummaryOp = tf.merge_all_summaries()
+		mergedSummaryOp = tf.summary.merge_all()
 
 	# 'Saver' op to save and restore all the variables
 	saver = tf.train.Saver()
@@ -145,7 +149,6 @@ if options.trainModel:
 			os.system("mkdir " + options.modelDir)
 
 			# Load the pre-trained Inception ResNet v2 model
-			variables_to_restore = slim.get_variables_to_restore(include=["InceptionResnetV2"])
 			restorer = tf.train.Saver(variables_to_restore)
 			restorer.restore(sess, inc_res_v2_checkpoint_file)
 
@@ -157,10 +160,10 @@ if options.trainModel:
 
 		if options.tensorboardVisualization:
 			# Op for writing logs to Tensorboard
-			summaryWriter = tf.train.SummaryWriter(options.logsDir, graph=tf.get_default_graph())
+			summaryWriter = tf.summary.FileWriter(options.logsDir, graph=tf.get_default_graph())
 
 		print ("Starting network training")
-		
+
 		# Keep training until reach max iterations
 		while True:
 			batchImagesTrain, batchLabelsTrain = inputReader.getTrainBatch()
@@ -178,7 +181,7 @@ if options.trainModel:
 				summaryWriter.add_summary(summary, step)
 			else:
 				[trainLoss, currentAcc, _] = sess.run([loss, accuracy, applyGradients], feed_dict={inputBatchImages: batchImagesTrain, inputBatchLabels: batchLabelsTrain, inputKeepProbability: options.neuronAliveProbability})
-			
+
 			print ("Iteration: %d, Minibatch Loss: %f, Accuracy: %f" % (step, trainLoss, currentAcc * 100))
 			step += 1
 
@@ -225,6 +228,7 @@ if options.trainModel:
 # Test model
 if options.testModel:
 	print ("Testing saved model")
+	computeAccuracyWithoutOtherClass = False
 	# Now we make sure the variable is now a constant, and that the graph still produces the expected result.
 	with tf.Session() as session:
 		saver = tf.train.import_meta_graph(options.modelDir + options.modelName + ".meta")
@@ -236,20 +240,37 @@ if options.testModel:
 		inputBatchImages = session.graph.get_tensor_by_name("Model/inputBatchImages:0")
 		inputBatchLabels = session.graph.get_tensor_by_name("Model/inputBatchLabels:0")
 		inputKeepProbability = session.graph.get_tensor_by_name("Model/inputKeepProbability:0")
-	
+
 		inputReader.resetTestBatchIndex()
 		accumulatedAccuracy = 0.0
 		numBatches = 0
 		while True:
-			batchImagesTest, batchLabelsTest = inputReader.getTestBatch()
+			extendDim = False if computeAccuracyWithoutOtherClass else True
+			batchImagesTest, batchLabelsTest = inputReader.getTestBatch(extendDim=extendDim)
 			if batchLabelsTest is None:
 				break
-			[predictions, accuracy] = session.run([predictionsNode, accuracyNode], feed_dict={inputBatchImages: batchImagesTest, inputBatchLabels: batchLabelsTest, inputKeepProbability: 1.0})
-			print ('Current test batch accuracy: %f' % accuracy)
-			accumulatedAccuracy += accuracy
+			if computeAccuracyWithoutOtherClass:
+				[predictions, accuracy] = session.run([predictionsNode, accuracyNode], feed_dict={inputBatchImages: batchImagesTest, inputBatchLabels: batchLabelsTest, inputKeepProbability: 1.0})
+				print ('Current test batch accuracy (without other): %f' % (accuracy))
+				accumulatedAccuracy += accuracy
+			else:
+				# Consider the prediction to be other class if the prediction confidence is less than 50%
+				predictions = session.run(predictionsNode, feed_dict={inputBatchImages: batchImagesTest, inputKeepProbability: 1.0})
+				predConf = np.max(predictions, axis=1)
+				predClass = np.argmax(predictions, axis=1)
+				actualClass = np.argmax(batchLabelsTest, axis=1)
+				for i in range(predConf.shape[0]):
+					print ("Prediction conf: %f, Predicted class: %d, GT: %d" % (predConf[i], predClass[i], actualClass[i]))
+					if predConf[i] < 0.5:
+						print ("(Low conf) Prediction conf: %f, Predicted class: %d, GT: %d" % (predConf[i], predClass[i], actualClass[i]))
+						predClass[i] = options.numClasses # Others class
+				accuracyWithOtherClass = np.mean(predClass == actualClass)
+				print ('Current test batch accuracy (with other): %f' % (accuracyWithOtherClass))
+				accumulatedAccuracy += accuracyWithOtherClass
+
 			numBatches += 1
 
-		accumulatedAccuracy = accumulatedAccuracy / numBatches
-		print ('Cummulative test set accuracy: %f' % accumulatedAccuracy * 100)
+	accumulatedAccuracy = accumulatedAccuracy / numBatches
+	print ('Cummulative test set accuracy: %f' % accumulatedAccuracy * 100)
 
 	print ("Model tested")
