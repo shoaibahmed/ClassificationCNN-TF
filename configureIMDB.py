@@ -8,13 +8,7 @@ from optparse import OptionParser
 def traverseDirectory(options):
 	imagesFileTrain = open(options.imagesTrainOutputFile, 'w')
 	imagesFileTest = open(options.imagesTestOutputFile, 'w')
-	classes = {"edeka": 0, "jysk": 1, "meinladen": 2, "netto": 3, "post": 4, "saturn": 5, "other": 6}
-
-	# Extract class name
-	if os.name == 'nt':
-		separator = '\\' # Windows
-	else:
-		separator = '/' # Ubuntu
+	classes = {}
 
 	keysCounter = 0
 	print ('Processing training set images')
@@ -25,7 +19,7 @@ def traverseDirectory(options):
 		for file in files:
 			if file.endswith(options.searchString):
 				fileName = str(os.path.abspath(os.path.join(root, file)))
-				fileNameList = fileName.split(separator) 
+				fileNameList = fileName.split(os.sep) 
 
 				# Class Name and Number
 				className = fileNameList[-2]
@@ -46,7 +40,7 @@ def traverseDirectory(options):
 		for file in files:
 			if file.endswith(options.searchString):
 				fileName = str(os.path.abspath(os.path.join(root, file)))
-				fileNameList = fileName.split(separator) 
+				fileNameList = fileName.split(os.sep) 
 
 				# Class Name and Number
 				className = fileNameList[-2]
