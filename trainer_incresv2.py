@@ -228,7 +228,7 @@ if options.trainModel:
 # Test model
 if options.testModel:
 	print ("Testing saved model")
-	computeAccuracyWithoutOtherClass = False
+	computeAccuracyWithoutOtherClass = True
 	# Now we make sure the variable is now a constant, and that the graph still produces the expected result.
 	with tf.Session() as session:
 		saver = tf.train.import_meta_graph(options.modelDir + options.modelName + ".meta")
@@ -271,6 +271,6 @@ if options.testModel:
 			numBatches += 1
 
 	accumulatedAccuracy = accumulatedAccuracy / numBatches
-	print ('Cummulative test set accuracy: %f' % accumulatedAccuracy * 100)
+	print ('Cummulative test set accuracy: %f \%' % (accumulatedAccuracy * 100))
 
 	print ("Model tested")
