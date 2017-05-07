@@ -1,8 +1,11 @@
 import os
+import os.path
 import numpy as np
 import skimage
 import skimage.io
 import skimage.transform
+import skimage.color
+import random
 
 class InputReader:
 	def __init__(self, options):
@@ -23,6 +26,46 @@ class InputReader:
 		self.totalImagesTest = len(self.imageListTest)
 
 		self.imgShape = [self.options.imageHeight, self.options.imageWidth, self.options.imageChannels]
+		self.imgShapeTrain = [350, 350, self.options.imageChannels]
+
+		if options.computeMeanImage:
+			meanFile = "meanImg.npy"
+			if os.path.isfile(meanFile):
+				self.meanImg = np.load(meanFile)
+				print ("Image mean: %s" % str(self.meanImg))
+			else:
+				print ("Computing mean image from training dataset")
+				# Compute mean image
+				meanImg = np.zeros([options.imageHeight, options.imageWidth, options.imageChannels])
+				imagesProcessed = 0
+				for i in range(len(self.imageList)):
+					try:
+						img = skimage.io.imread(self.imageList[i])
+
+						# Convert image to rgb if grayscale
+						if len(img.shape) == 2:
+							img = skimage.color.gray2rgb(img)
+
+						if img.shape != self.imgShape:
+							img = skimage.transform.resize(img, self.imgShape, preserve_range=True)
+
+					except:
+						print ("Unable to load image: %s" % self.imageList[i])
+						continue
+					
+					img = img.astype(float)
+					meanImg += img
+					imagesProcessed += 1
+
+				meanImg = meanImg / imagesProcessed
+				self.meanImg = meanImg
+				np.save("fullImageMean.npy", self.meanImg)
+
+				# Convert mean to per channel mean (single channel images)
+				self.meanImg = np.mean(np.mean(self.meanImg, axis=0), axis=0)
+				np.save(meanFile, self.meanImg)
+
+				print ("Mean image computed")
 
 	def readImageNames(self, imageListFile):
 		"""Reads a .txt file containing paths and labels
@@ -35,15 +78,15 @@ class InputReader:
 		fileNames = []
 		labels = []
 		for line in f:
-			data = line.strip().split(',')
+			data = line.strip().split(' ')
 			fileName = data[0].strip()
 			label = int(data[1].strip())
-			fileNames.append(fileName)
+			fileNames.append(self.options.imagesBaseDir + fileName)
 			labels.append(label)
 
 		return fileNames, labels
 
-	def readImagesFromDisk(self, fileNames):
+	def readImagesFromDisk(self, fileNames, isTrain = True):
 		"""Consumes a list of filenames and returns images
 		Args:
 		  fileNames: List of image files
@@ -52,15 +95,39 @@ class InputReader:
 		"""
 		images = []
 		masks = []
-		for i in range(0, len(fileNames)):			
+		for i in range(0, len(fileNames)):
 			if self.options.verbose > 1:
 				print ("Image: %s" % fileNames[i])
 
 			# Read image
 			img = skimage.io.imread(fileNames[i])
-			
-			if img.shape != self.imgShape:
-				img = skimage.transform.resize(img, self.imgShape, preserve_range=True)
+
+			# Convert image to rgb if grayscale
+			if len(img.shape) == 2:
+				img = skimage.color.gray2rgb(img)
+
+			if isTrain:
+				if img.shape != self.imgShapeTrain:
+					img = skimage.transform.resize(img, self.imgShapeTrain, preserve_range=True)
+
+				# Take a random crop from the image
+				randY = random.randint(0, 350 - self.options.imageHeight - 1)
+				randX = random.randint(0, 350 - self.options.imageWidth - 1)
+				img = img[randY:(randY+self.options.imageHeight), randX:(randX+self.options.imageWidth)]
+
+				if self.options.computeMeanImage:
+					img = img - self.meanImg
+
+				if random.random() > 0.5:
+					img = np.fliplr(img)
+
+			else:
+				if img.shape != self.imgShape:
+					img = skimage.transform.resize(img, self.imgShape, preserve_range=True)
+
+				if self.options.computeMeanImage:
+					img = img - self.meanImg
+
 			images.append(img)
 
 		# Convert list to ndarray
@@ -90,7 +157,7 @@ class InputReader:
 			# Randomly fetch any images
 			self.indices = np.random.choice(self.totalImages, self.options.batchSize)
 
-		imagesBatch = self.readImagesFromDisk([self.imageList[index] for index in self.indices])
+		imagesBatch = self.readImagesFromDisk([self.imageList[index] for index in self.indices], isTrain = True)
 		labelsBatch = self.convertLabelsToOneHot([self.labelList[index] for index in self.indices])
 
 		self.currentIndex = endIndex
@@ -108,7 +175,7 @@ class InputReader:
 	def resetTestBatchIndex(self):
 		self.currentIndexTest = 0
 
-	def getTestBatch(self, extendDim=False):
+	def getTestBatch(self):
 		"""Returns testing images and labels in batch
 		Args:
 		  None
@@ -121,16 +188,16 @@ class InputReader:
 
 		if self.options.randomFetchTest:
 			self.indices = np.random.choice(self.totalImagesTest, self.options.batchSize)
-			imagesBatch = self.readImagesFromDisk([self.imageListTest[index] for index in self.indices])
-			labelsBatch = self.convertLabelsToOneHot([self.labelList[index] for index in self.indices], extendDim=extendDim)
-			
+			imagesBatch = self.readImagesFromDisk([self.imageListTest[index] for index in self.indices], isTrain = False)
+			labelsBatch = self.convertLabelsToOneHot([self.labelList[index] for index in self.indices])
+
 		else:
 			endIndex = self.currentIndexTest + self.options.batchSize
 			if endIndex > self.totalImagesTest:
 				endIndex = self.totalImagesTest
 			self.indices = np.arange(self.currentIndexTest, endIndex)
-			imagesBatch = self.readImagesFromDisk([self.imageListTest[index] for index in self.indices])
-			labelsBatch = self.convertLabelsToOneHot([self.labelListTest[index] for index in self.indices], extendDim=extendDim)
+			imagesBatch = self.readImagesFromDisk([self.imageListTest[index] for index in self.indices], isTrain = False)
+			labelsBatch = self.convertLabelsToOneHot([self.labelListTest[index] for index in self.indices])
 			self.currentIndexTest = endIndex
 
 		return imagesBatch, labelsBatch
@@ -146,16 +213,14 @@ class InputReader:
 		self.totalEpochs = processedImages / self.totalImages
 		self.currentIndex = processedImages % self.totalImages
 
-	def convertLabelsToOneHot(self, labels, extendDim=False):
+	def convertLabelsToOneHot(self, labels):
 		oneHotLabels = []
 		numElements = self.options.numClasses
-		if extendDim:
-				numElements += 1
-
+		
 		for label in labels:
 			oneHotVector = np.zeros(numElements)
 			oneHotVector[label] = 1
 			oneHotLabels.append(oneHotVector)
-		
+
 		oneHotLabels = np.array(oneHotLabels)
 		return oneHotLabels

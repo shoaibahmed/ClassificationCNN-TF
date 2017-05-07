@@ -6,16 +6,29 @@ from optparse import OptionParser
 import datetime as dt
 
 # Import FCN Model
+# from inception_resnet_v2 import *
 from inception_resnet_v2 import *
-from pathlib import Path
+from vgg_slim import *
 
 inc_res_v2_checkpoint_file = './inception_resnet_v2_2016_08_30.ckpt'
-my_file = Path(inc_res_v2_checkpoint_file)
-if not my_file.is_file():
+if not os.path.isfile(inc_res_v2_checkpoint_file):
 	# Download file from the link
 	import wget
 	import tarfile
 	url = 'http://download.tensorflow.org/models/inception_resnet_v2_2016_08_30.tar.gz'
+	filename = wget.download(url)
+
+	# Extract the tar file
+	tar = tarfile.open(filename)
+	tar.extractall()
+	tar.close()
+
+vgg_checkpoint_file = './vgg_16.ckpt'
+if not os.path.isfile(vgg_checkpoint_file):
+	# Download file from the link
+	import wget
+	import tarfile
+	url = 'http://download.tensorflow.org/models/vgg_16_2016_08_28.tar.gz'
 	filename = wget.download(url)
 
 	# Extract the tar file
@@ -32,36 +45,45 @@ parser.add_option("-c", "--testModel", action="store_true", dest="testModel", de
 parser.add_option("-s", "--startTrainingFromScratch", action="store_true", dest="startTrainingFromScratch", default=False, help="Start training from scratch")
 parser.add_option("-v", "--verbose", action="store", type="int", dest="verbose", default=0, help="Verbosity level")
 parser.add_option("--tensorboardVisualization", action="store_true", dest="tensorboardVisualization", default=False, help="Enable tensorboard visualization")
+parser.add_option("--useInceptionModel", action="store_true", dest="useInceptionModel", default=False, help="Use inception v4 model")
 
 # Input Reader Params
-parser.add_option("--trainFileName", action="store", type="string", dest="trainFileName", default="train.idl", help="IDL file name for training")
-parser.add_option("--testFileName", action="store", type="string", dest="testFileName", default="test.idl", help="IDL file name for testing")
+parser.add_option("--trainFileName", action="store", type="string", dest="trainFileName", default="/netscratch/siddiqui/BookCover/title30cat/title30cat-labels-train.txt", help="IDL file name for training")
+parser.add_option("--testFileName", action="store", type="string", dest="testFileName", default="/netscratch/siddiqui/BookCover/title30cat/title30cat-labels-test.txt", help="IDL file name for testing")
+parser.add_option("--imagesBaseDir", action="store", type="string", dest="imagesBaseDir", default="/netscratch/siddiqui/BookCover/images_original/", help="IDL file name for testing")
 parser.add_option("--imageWidth", action="store", type="int", dest="imageWidth", default=299, help="Image width for feeding into the network")
 parser.add_option("--imageHeight", action="store", type="int", dest="imageHeight", default=299, help="Image height for feeding into the network")
 parser.add_option("--imageChannels", action="store", type="int", dest="imageChannels", default=3, help="Number of channels in image for feeding into the network")
 parser.add_option("--sequentialFetch", action="store_true", dest="sequentialFetch", default=False, help="Sequentially fetch images for each batch")
 parser.add_option("--randomFetchTest", action="store_true", dest="randomFetchTest", default=False, help="Randomly fetch images for each test batch")
+parser.add_option("--computeMeanImage", action="store_false", dest="computeMeanImage", default=False, help="Compute mean image on data")
 
 # Trainer Params
 parser.add_option("--learningRate", action="store", type="float", dest="learningRate", default=1e-4, help="Learning rate")
-parser.add_option("--trainingEpochs", action="store", type="int", dest="trainingEpochs", default=5, help="Training epochs")
-parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=2, help="Batch size")
+parser.add_option("--trainingEpochs", action="store", type="int", dest="trainingEpochs", default=10, help="Training epochs")
+parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=60, help="Batch size")
 parser.add_option("--displayStep", action="store", type="int", dest="displayStep", default=5, help="Progress display step")
 parser.add_option("--saveStep", action="store", type="int", dest="saveStep", default=1000, help="Progress save step")
-parser.add_option("--evaluateStep", action="store", type="int", dest="evaluateStep", default=100000, help="Progress evaluation step")
+parser.add_option("--evaluateStep", action="store", type="int", dest="evaluateStep", default=10000000, help="Progress evaluation step")
 
 # Directories
 parser.add_option("--logsDir", action="store", type="string", dest="logsDir", default="./logs", help="Directory for saving logs")
 parser.add_option("--modelDir", action="store", type="string", dest="modelDir", default="./model-inc_res_v2/", help="Directory for saving the model")
-parser.add_option("--modelName", action="store", type="string", dest="modelName", default="inc_res_v2_fcn", help="Name to be used for saving the model")
+parser.add_option("--modelName", action="store", type="string", dest="modelName", default="inc_res_v2_book", help="Name to be used for saving the model")
 
 # Network Params
-parser.add_option("--numClasses", action="store", type="int", dest="numClasses", default=6, help="Number of classes")
+parser.add_option("--numClasses", action="store", type="int", dest="numClasses", default=30, help="Number of classes")
 parser.add_option("--neuronAliveProbability", action="store", type="float", dest="neuronAliveProbability", default=0.5, help="Probability of keeping a neuron active during training")
 
 # Parse command line options
 (options, args) = parser.parse_args()
 print (options)
+
+if not options.useInceptionModel:
+	options.imageHeight = 224
+	options.imageWidth = 224
+	options.modelDir = "./model-vgg_16/"
+	options.modelName = "./vgg_16_book/"
 
 # Import custom data
 import inputReader
@@ -75,26 +97,49 @@ if options.trainModel:
 		inputBatchLabels = tf.placeholder(dtype=tf.float32, shape=[None, options.numClasses], name="inputBatchLabels")
 		inputKeepProbability = tf.placeholder(dtype=tf.float32, name="inputKeepProbability")
 
-		scaledInputBatchImages = tf.scalar_mul((1.0/255), inputBatchImages)
-		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
-		scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
+	if options.useInceptionModel:
+		with tf.variable_scope('Model'):
+			scaledInputBatchImages = tf.scalar_mul((1.0/255), inputBatchImages)
+			scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
+			scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
 
-	# Create model
-	arg_scope = inception_resnet_v2_arg_scope()
-	with slim.arg_scope(arg_scope):
-		logits, end_points = inception_resnet_v2(scaledInputBatchImages, inputKeepProbability, options.numClasses, is_training=True)
+		# Create model
+		arg_scope = inception_resnet_v2_arg_scope()
+		with slim.arg_scope(arg_scope):
+			logits, aux_logits, end_points = inception_resnet_v2(scaledInputBatchImages, inputKeepProbability, options.numClasses, is_training=True)
 
-	# Create list of vars to restore before train op
-	variables_to_restore = slim.get_variables_to_restore(include=["InceptionResnetV2"])
+		# Create list of vars to restore before train op
+		variables_to_restore = slim.get_variables_to_restore(include=["InceptionResnetV2"])
+
+	# VGG model
+	else:
+		with slim.arg_scope(vgg_arg_scope()):
+			logits, end_points = vgg_16(inputBatchImages, inputKeepProbability, options.numClasses)
+
+		# Create list of vars to restore before train op
+		variables_to_restore = slim.get_variables_to_restore(include=["vgg_16"])
+
+	# Exclude the 'alpha' variables (parametric_relu)
+	variables_to_restore_new = []
+	for var in variables_to_restore:
+		if "param_relu_alpha" not in var.name:
+			# print (var.name)
+			variables_to_restore_new.append(var)
+	variables_to_restore = variables_to_restore_new
 
 	with tf.name_scope('Loss'):
 		# Define loss
 		# Reversed from slim.losses.softmax_cross_entropy(logits, labels) => tf.losses.softmax_cross_entropy(labels, logits)
-		cross_entropy_loss = tf.losses.softmax_cross_entropy(inputBatchLabels, logits)
+		cross_entropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchLabels, logits=logits)
+		# cross_entropy_loss = slim.losses.softmax_cross_entropy(logits, inputBatchLabels)
 		# loss = tf.reduce_sum(slim.losses.get_regularization_losses()) + cross_entropy_loss
+		# cross_entropy_loss_aux_logits = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchLabels, logits=aux_logits)
 
-		tf.add_to_collection('losses', cross_entropy_loss)
-		loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+		# tf.add_to_collection('losses', cross_entropy_loss)
+		# loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+		tf.losses.add_loss(cross_entropy_loss)
+		# tf.losses.add_loss(cross_entropy_loss_aux_logits)
+		loss = tf.reduce_mean(tf.losses.get_losses())
 
 	with tf.name_scope('Accuracy'):
 		correct_predictions = tf.equal(tf.argmax(end_points['Predictions'], 1), tf.argmax(inputBatchLabels, 1))
@@ -148,9 +193,12 @@ if options.trainModel:
 			os.system("rm -rf " + options.modelDir)
 			os.system("mkdir " + options.modelDir)
 
-			# Load the pre-trained Inception ResNet v2 model
+			# Load the pre-trained model
 			restorer = tf.train.Saver(variables_to_restore)
-			restorer.restore(sess, inc_res_v2_checkpoint_file)
+			if options.useInceptionModel:
+				restorer.restore(sess, inc_res_v2_checkpoint_file)
+			else:
+				restorer.restore(sess, vgg_checkpoint_file)
 
 		# Restore checkpoint
 		else:
@@ -245,8 +293,7 @@ if options.testModel:
 		accumulatedAccuracy = 0.0
 		numBatches = 0
 		while True:
-			extendDim = False if computeAccuracyWithoutOtherClass else True
-			batchImagesTest, batchLabelsTest = inputReader.getTestBatch(extendDim=extendDim)
+			batchImagesTest, batchLabelsTest = inputReader.getTestBatch()
 			if batchLabelsTest is None:
 				break
 			if computeAccuracyWithoutOtherClass:
@@ -271,6 +318,6 @@ if options.testModel:
 			numBatches += 1
 
 	accumulatedAccuracy = accumulatedAccuracy / numBatches
-	print ('Cummulative test set accuracy: %f \%' % (accumulatedAccuracy * 100))
+	print ('Cummulative test set accuracy: %f' % (accumulatedAccuracy * 100))
 
 	print ("Model tested")
