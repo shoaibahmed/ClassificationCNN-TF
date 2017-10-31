@@ -203,7 +203,7 @@ if options.trainModel:
 		# Restore checkpoint
 		else:
 			print ("Restoring from checkpoint")
-			saver = tf.train.import_meta_graph(options.modelDir + options.modelName + ".meta")
+			#saver = tf.train.import_meta_graph(options.modelDir + options.modelName + ".meta")
 			saver.restore(sess, options.modelDir + options.modelName)
 
 		if options.tensorboardVisualization:
