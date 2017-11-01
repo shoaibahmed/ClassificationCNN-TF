@@ -47,6 +47,8 @@ parser.add_option("--useImageMean", action="store_true", dest="useImageMean", de
 
 # Trainer Params
 parser.add_option("--learningRate", action="store", type="float", dest="learningRate", default=1e-4, help="Learning rate")
+parser.add_option("--labelSmoothing", action="store", type="float", dest="labelSmoothing", default=0.1, help="Label smoothing parameter")
+parser.add_option("--weightedSoftmax", action="store_true", dest="weightedSoftmax", default=False, help="Use weighted softmax")
 parser.add_option("--trainingEpochs", action="store", type="int", dest="trainingEpochs", default=10, help="Training epochs")
 parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=5, help="Batch size")
 parser.add_option("--saveStep", action="store", type="int", dest="saveStep", default=1000, help="Progress save step")
@@ -152,7 +154,7 @@ def _parse_function(filename, label):
 # A vector of filenames
 currentDataFile = options.trainDataFile if options.trainModel else options.testDataFile
 print ("Loading data from file: %s" % (currentDataFile))
-dataClasses = []
+dataClasses = {}
 with open(currentDataFile) as f:
 	imagesBaseDir = '/netscratch/siddiqui/CrossLayerPooling/data/OpticDiscs/'
 	imageFileNames = f.readlines()
@@ -164,7 +166,9 @@ with open(currentDataFile) as f:
 		imLabels.append(int(imName[1]))
 
 		if int(imName[1]) not in dataClasses:
-			dataClasses.append(int(imName[1]))
+			dataClasses[int(imName[1])] = 1
+		else:
+			dataClasses[int(imName[1])] += 1
 
 	# imageFileNames = [x.strip().split(' ') for x in imageFileNames] # FileName and Label is separated by a space
 	imNames = tf.constant(imNames)
@@ -174,6 +178,9 @@ numClasses = len(dataClasses)
 numFiles = len(imageFileNames)
 print ("Dataset loaded")
 print ("Files: %d | Classes: %d" % (numFiles, numClasses))
+print (dataClasses)
+classWeights = [float(numFiles - dataClasses[x]) / float(numFiles) for x in dataClasses]
+print ("Class weights: %s" % str(classWeights))
 
 dataset = tf.contrib.data.Dataset.from_tensor_slices((imNames, imLabels))
 dataset = dataset.map(_parse_function)
@@ -184,8 +191,8 @@ iterator = dataset.make_initializable_iterator()
 
 with tf.name_scope('Model'):
 	# Data placeholders
-	inputBatchImages, inputBatchImageNames, inputBatchImageLabels = iterator.get_next()
-	inputBatchImageLabels = tf.one_hot(inputBatchImageLabels, depth=numClasses)
+	inputBatchImages, inputBatchImageNames, inputBatchLabels = iterator.get_next()
+	inputBatchImageLabels = tf.one_hot(inputBatchLabels, depth=numClasses)
 
 	print ("Data shape: %s" % str(inputBatchImages.get_shape()))
 	print ("Labels shape: %s" % str(inputBatchImageLabels.get_shape()))
@@ -232,8 +239,8 @@ with tf.name_scope('Model'):
 		# Create model
 		arg_scope = nasnet.nasnet_large_arg_scope()
 		with slim.arg_scope(arg_scope):
-			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
-			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=False, num_classes=numClasses)
+			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
+			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=False, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["final_layer/Logits", "aux_1/AuxLogits"])
@@ -243,8 +250,17 @@ with tf.name_scope('Model'):
 		exit(-1)
 
 with tf.name_scope('Loss'):
+	if options.weightedSoftmax:
+		print ("Using weighted softmax")
+		# Define the class weightages (weighted softmax)
+		classWeightsTensor = tf.constant(classWeights)
+		classWeights = tf.gather(classWeightsTensor, inputBatchLabels)
+	else:
+		print ("Using unweighted softmax")
+		classWeights = tf.ones_like(inputBatchLabels)
+
 	# Define loss
-	cross_entropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchImageLabels, logits=logits)
+	cross_entropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchImageLabels, logits=logits, weights=classWeights, label_smoothing=options.labelSmoothing)
 	tf.losses.add_loss(cross_entropy_loss)
 	loss = tf.reduce_mean(tf.losses.get_losses())
 
@@ -342,9 +358,9 @@ if options.trainModel:
 			except tf.errors.OutOfRangeError:
 				print('Done training for %d epochs, %d steps.' % (epoch, step))
 
-			# Save final model weights to disk
-			saver.save(sess, os.path.join(options.modelDir, options.modelName))
-			print ("Model saved: %s" % (os.path.join(options.modelDir, options.modelName)))
+		# Save final model weights to disk
+		saver.save(sess, os.path.join(options.modelDir, options.modelName))
+		print ("Model saved: %s" % (os.path.join(options.modelDir, options.modelName)))
 
 	print ("Optimization Finished!")
 
@@ -353,8 +369,15 @@ if options.testModel:
 	print ("Testing saved model")
 
 	# Now we make sure the variable is now a constant, and that the graph still produces the expected result.
-	with tf.Session() as session:
-		saver.restore(session, os.path.join(options.modelDir, options.modelName))
+	with tf.Session(config=config) as sess:
+		# Initialize all vars
+		sess.run(init)
+		sess.run(init_local)
+
+		saver.restore(sess, os.path.join(options.modelDir, options.modelName))
+
+		# Initialize the dataset iterator
+		sess.run(iterator.initializer)
 
 		try:
 			step = 0
@@ -363,8 +386,7 @@ if options.testModel:
 			while True:
 				start_time = time.time()
 				
-				[batchLabelsTest, predictions, currentAcc] = session.run([inputBatchImageLabels, end_points['Predictions'], accuracy])
-				print('Step: %d | Accuracy: %f | Duration: %f' % (step, currentAcc, duration))
+				[batchLabelsTest, predictions, currentAcc] = sess.run([inputBatchImageLabels, end_points['Predictions'], accuracy])
 
 				predConf = np.max(predictions, axis=1)
 				predClass = np.argmax(predictions, axis=1)
@@ -374,13 +396,11 @@ if options.testModel:
 				totalInstances += predClass.shape[0]
 
 				duration = time.time() - start_time
+				print('Step: %d | Accuracy: %f | Duration: %f' % (step, currentAcc, duration))
 
-				# Print an overview fairly often.
-				if step % options.displayStep == 0:
-					print('Step: %d | Loss: %f | Accuracy: %f | Duration: %f' % (step, trainLoss, currentAcc, duration))
 				step += 1
 		except tf.errors.OutOfRangeError:
-			print('Done training for %d epochs, %d steps.' % (epoch, step))
+			print('Done training for %d epochs, %d steps.' % (1, step))
 
 	print ('Number of test images: %d' % (totalInstances))
 	print ('Number of correctly predicted images: %d' % (correctInstances))
