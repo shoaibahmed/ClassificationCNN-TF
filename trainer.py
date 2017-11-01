@@ -127,7 +127,6 @@ print ("Resized image dimensions: %s" % str(RESIZED_IMAGE_DIMS))
 # Reads an image from a file, decodes it into a dense tensor
 def _parse_function(filename, label):
 	image_string = tf.read_file(filename)
-	# img = tf.image.decode_image(image_string)
 	img = tf.image.decode_jpeg(image_string)
 
 	if options.trainModel:
@@ -148,50 +147,59 @@ def _parse_function(filename, label):
 
 	img.set_shape([options.imageHeight, options.imageWidth, options.imageChannels])
 	img = tf.cast(img, tf.float32) # Convert to float tensor
-	# print (img.shape)
 	return img, filename, label
 
+def loadDataset(currentDataFile):
+	print ("Loading data from file: %s" % (currentDataFile))
+	dataClasses = {}
+	with open(currentDataFile) as f:
+		imagesBaseDir = '/netscratch/siddiqui/CrossLayerPooling/data/OpticDiscs/'
+		imageFileNames = f.readlines()
+		imNames = []
+		imLabels = []
+		for imName in imageFileNames:
+			imName = imName.strip().split(' ')
+			imNames.append(os.path.join(imagesBaseDir, imName[0]))
+			imLabels.append(int(imName[1]))
+
+			if int(imName[1]) not in dataClasses:
+				dataClasses[int(imName[1])] = 1
+			else:
+				dataClasses[int(imName[1])] += 1
+
+		# imageFileNames = [x.strip().split(' ') for x in imageFileNames] # FileName and Label is separated by a space
+		imNames = tf.constant(imNames)
+		imLabels = tf.constant(imLabels)
+
+	numClasses = len(dataClasses)
+	numFiles = len(imageFileNames)
+	print ("Dataset loaded")
+	print ("Files: %d | Classes: %d" % (numFiles, numClasses))
+	print (dataClasses)
+	classWeights = [float(numFiles - dataClasses[x]) / float(numFiles) for x in dataClasses]
+	print ("Class weights: %s" % str(classWeights))
+
+	dataset = tf.contrib.data.Dataset.from_tensor_slices((imNames, imLabels))
+	dataset = dataset.map(_parse_function)
+	dataset = dataset.shuffle(buffer_size=numFiles)
+	dataset = dataset.batch(options.batchSize)
+
+	return dataset, numClasses, classWeights
+
 # A vector of filenames
-currentDataFile = options.trainDataFile if options.trainModel else options.testDataFile
-print ("Loading data from file: %s" % (currentDataFile))
-dataClasses = {}
-with open(currentDataFile) as f:
-	imagesBaseDir = '/netscratch/siddiqui/CrossLayerPooling/data/OpticDiscs/'
-	imageFileNames = f.readlines()
-	imNames = []
-	imLabels = []
-	for imName in imageFileNames:
-		imName = imName.strip().split(' ')
-		imNames.append(os.path.join(imagesBaseDir, imName[0]))
-		imLabels.append(int(imName[1]))
+trainDataset, numClasses, classWeights = loadDataset(options.trainDataFile)
+valDataset, _, _ = loadDataset(options.valDataFile)
+testDataset, _, _ = loadDataset(options.testDataFile)
 
-		if int(imName[1]) not in dataClasses:
-			dataClasses[int(imName[1])] = 1
-		else:
-			dataClasses[int(imName[1])] += 1
-
-	# imageFileNames = [x.strip().split(' ') for x in imageFileNames] # FileName and Label is separated by a space
-	imNames = tf.constant(imNames)
-	imLabels = tf.constant(imLabels)
-
-numClasses = len(dataClasses)
-numFiles = len(imageFileNames)
-print ("Dataset loaded")
-print ("Files: %d | Classes: %d" % (numFiles, numClasses))
-print (dataClasses)
-classWeights = [float(numFiles - dataClasses[x]) / float(numFiles) for x in dataClasses]
-print ("Class weights: %s" % str(classWeights))
-
-dataset = tf.contrib.data.Dataset.from_tensor_slices((imNames, imLabels))
-dataset = dataset.map(_parse_function)
-dataset = dataset.shuffle(buffer_size=numFiles)
-dataset = dataset.batch(options.batchSize)
-
-iterator = dataset.make_initializable_iterator()
+trainIterator = trainDataset.make_initializable_iterator()
+valIterator = valDataset.make_initializable_iterator()
+testIterator = testDataset.make_initializable_iterator()
 
 with tf.name_scope('Model'):
 	# Data placeholders
-	inputBatchImages, inputBatchImageNames, inputBatchLabels = iterator.get_next()
+	datasetSelectionPlaceholder = tf.placeholder(dtype=tf.int32, shape=(), name='DatasetSelectionPlaceholder')
+	inputBatchImages, inputBatchImageNames, inputBatchLabels = tf.cond(tf.equal(datasetSelectionPlaceholder, TRAIN), lambda: trainIterator.get_next(), 
+																lambda: tf.cond(tf.equal(datasetSelectionPlaceholder, VAL), lambda: valIterator.get_next(), lambda: testIterator.get_next()))
 	inputBatchImageLabels = tf.one_hot(inputBatchLabels, depth=numClasses)
 
 	print ("Data shape: %s" % str(inputBatchImages.get_shape()))
@@ -270,14 +278,15 @@ with tf.name_scope('Accuracy'):
 
 with tf.name_scope('Optimizer'):
 	# Define Optimizer
-	optimizer = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(loss)
+	# trainOp = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(loss)
+	optimizer = tf.train.AdamOptimizer(learning_rate=options.learningRate)
 
-	# # Op to calculate every variable gradient
-	# gradients = tf.gradients(loss, tf.trainable_variables())
-	# gradients = list(zip(gradients, tf.trainable_variables()))
+	# Op to calculate every variable gradient
+	gradients = tf.gradients(loss, tf.trainable_variables())
+	gradients = list(zip(gradients, tf.trainable_variables()))
 
-	# # Op to update all variables according to their gradient
-	# applyGradients = optimizer.apply_gradients(grads_and_vars=gradients)
+	# Op to update all variables according to their gradient
+	trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
 
 # Initializing the variables
 init = tf.global_variables_initializer() # TensorFlow v0.11
@@ -290,15 +299,14 @@ if options.tensorboardVisualization:
 	# Create summaries to visualize weights
 	for var in tf.trainable_variables():
 		tf.summary.histogram(var.name, var)
-	# # Summarize all gradients
-	# for grad, var in gradients:
-	# 	tf.summary.histogram(var.name + '/gradient', grad)
+
+	# Summarize all gradients
+	for grad, var in gradients:
+		if grad is not None:
+			tf.summary.histogram(var.name + '/gradient', grad)
 
 	# Merge all summaries into a single op
 	mergedSummaryOp = tf.summary.merge_all()
-
-# 'Saver' op to save and restore all the variables
-saver = tf.train.Saver()
 
 # GPU config
 config = tf.ConfigProto()
@@ -329,13 +337,17 @@ if options.trainModel:
 			restorer = tf.train.Saver(variables_to_restore)
 			restorer.restore(sess, os.path.join(options.modelDir, options.modelName))
 
+		# Saver op to save and restore all the variables
+		saver = tf.train.Saver()
+
 		if options.tensorboardVisualization:
 			# Write the graph to file
 			summaryWriter = tf.summary.FileWriter(options.logsDir, graph=tf.get_default_graph())
 
+		globalStep = 0
 		for epoch in range(options.trainingEpochs):
 			# Initialize the dataset iterator
-			sess.run(iterator.initializer)
+			sess.run(trainIterator.initializer)
 
 			try:
 				step = 0
@@ -344,10 +356,10 @@ if options.trainModel:
 
 					# Run optimization op (backprop)
 					if options.tensorboardVisualization:
-						[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, optimizer, mergedSummaryOp])
-						summaryWriter.add_summary(summary, step)
+						[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+						summaryWriter.add_summary(summary, globalStep)
 					else:
-						[trainLoss, currentAcc, _] = sess.run([loss, accuracy, optimizer])
+						[trainLoss, currentAcc, _] = sess.run([loss, accuracy, trainOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
 
 					duration = time.time() - start_time
 
@@ -355,6 +367,8 @@ if options.trainModel:
 					if step % options.displayStep == 0:
 						print('Step: %d | Loss: %f | Accuracy: %f | Duration: %f' % (step, trainLoss, currentAcc, duration))
 					step += 1
+					globalStep += 1
+
 			except tf.errors.OutOfRangeError:
 				print('Done training for %d epochs, %d steps.' % (epoch, step))
 
@@ -370,14 +384,12 @@ if options.testModel:
 
 	# Now we make sure the variable is now a constant, and that the graph still produces the expected result.
 	with tf.Session(config=config) as sess:
-		# Initialize all vars
-		sess.run(init)
-		sess.run(init_local)
-
+		# Saver op to save and restore all the variables
+		saver = tf.train.Saver()
 		saver.restore(sess, os.path.join(options.modelDir, options.modelName))
 
 		# Initialize the dataset iterator
-		sess.run(iterator.initializer)
+		sess.run(testIterator.initializer)
 
 		try:
 			step = 0
@@ -386,7 +398,7 @@ if options.testModel:
 			while True:
 				start_time = time.time()
 				
-				[batchLabelsTest, predictions, currentAcc] = sess.run([inputBatchImageLabels, end_points['Predictions'], accuracy])
+				[batchLabelsTest, predictions, currentAcc] = sess.run([inputBatchImageLabels, logits, accuracy], feed_dict={datasetSelectionPlaceholder: TEST})
 
 				predConf = np.max(predictions, axis=1)
 				predClass = np.argmax(predictions, axis=1)
