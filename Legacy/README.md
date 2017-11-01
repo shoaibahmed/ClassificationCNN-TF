@@ -1,0 +1,4 @@
+<h1>CNN for Classification in TensorFlow</h1> <br/>
+This repository provides a basic implementation of a classiciation CNN in TensorFlow which adapts transfer learning methodology for model initialization. The code uses pretrained VGG-16 or Inception_ResNet_v2 network for its initialization. Refer to the paper for more details <b>[https://arxiv.org/pdf/1409.1556.pdf, https://arxiv.org/pdf/1602.07261.pdf]</b>. For training the network on your own dataset, use <b>configureIMDB.py</b> script to setup the dataset or modify the code available in the file <b>inputReader.py</b> to read in the data yourself. Use <b>trainer_incresv2.py</b> script to start training. Use inception flag to use Inception v4 instead of VGG-16 model which is used by default.
+
+<br/><br/> Email: <b>12bscsssiddiqui@seecs.edu.pk</b>

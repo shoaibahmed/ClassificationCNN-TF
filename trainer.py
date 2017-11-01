@@ -1,323 +1,387 @@
-import os
-import numpy as np
 import tensorflow as tf
-from tensorflow.python.platform import gfile
+slim = tf.contrib.slim
+
+import numpy as np
+
 from optparse import OptionParser
-import datetime as dt
+import wget
+import tarfile
+import os
+import cv2
+import time
+import shutil
 
-# Import FCN Model
-# from inception_resnet_v2 import *
-from inception_resnet_v2 import *
-from vgg_slim import *
+import inception_resnet_v2
+import resnet_v1
+import nasnet.nasnet as nasnet
 
-inc_res_v2_checkpoint_file = './inception_resnet_v2_2016_08_30.ckpt'
-if not os.path.isfile(inc_res_v2_checkpoint_file):
-	# Download file from the link
-	import wget
-	import tarfile
-	url = 'http://download.tensorflow.org/models/inception_resnet_v2_2016_08_30.tar.gz'
-	filename = wget.download(url)
+TRAIN = 0
+VAL = 1
+TEST = 2
 
-	# Extract the tar file
-	tar = tarfile.open(filename)
-	tar.extractall()
-	tar.close()
+import sys
 
-vgg_checkpoint_file = './vgg_16.ckpt'
-if not os.path.isfile(vgg_checkpoint_file):
-	# Download file from the link
-	import wget
-	import tarfile
-	url = 'http://download.tensorflow.org/models/vgg_16_2016_08_28.tar.gz'
-	filename = wget.download(url)
-
-	# Extract the tar file
-	tar = tarfile.open(filename)
-	tar.extractall()
-	tar.close()
+if sys.version_info[0] == 3:
+	print ("Using Python 3")
+	import pickle as cPickle
+else:
+	print ("Using Python 2")
+	import cPickle
 
 # Command line options
 parser = OptionParser()
 
 # General settings
+parser.add_option("-m", "--model", action="store", type="string", dest="model", default="NAS", help="Model to be used for Cross-Layer Pooling")
 parser.add_option("-t", "--trainModel", action="store_true", dest="trainModel", default=False, help="Train model")
 parser.add_option("-c", "--testModel", action="store_true", dest="testModel", default=False, help="Test model")
 parser.add_option("-s", "--startTrainingFromScratch", action="store_true", dest="startTrainingFromScratch", default=False, help="Start training from scratch")
-parser.add_option("-v", "--verbose", action="store", type="int", dest="verbose", default=0, help="Verbosity level")
-parser.add_option("--tensorboardVisualization", action="store_true", dest="tensorboardVisualization", default=False, help="Enable tensorboard visualization")
-parser.add_option("--useInceptionModel", action="store_true", dest="useInceptionModel", default=False, help="Use inception v4 model")
+parser.add_option("-v", "--tensorboardVisualization", action="store_true", dest="tensorboardVisualization", default=False, help="Enable tensorboard visualization")
 
 # Input Reader Params
-parser.add_option("--trainFileName", action="store", type="string", dest="trainFileName", default="/netscratch/siddiqui/BookCover/title30cat/title30cat-labels-train.txt", help="IDL file name for training")
-parser.add_option("--testFileName", action="store", type="string", dest="testFileName", default="/netscratch/siddiqui/BookCover/title30cat/title30cat-labels-test.txt", help="IDL file name for testing")
-parser.add_option("--imagesBaseDir", action="store", type="string", dest="imagesBaseDir", default="/netscratch/siddiqui/BookCover/images_original/", help="IDL file name for testing")
-parser.add_option("--imageWidth", action="store", type="int", dest="imageWidth", default=299, help="Image width for feeding into the network")
-parser.add_option("--imageHeight", action="store", type="int", dest="imageHeight", default=299, help="Image height for feeding into the network")
-parser.add_option("--imageChannels", action="store", type="int", dest="imageChannels", default=3, help="Number of channels in image for feeding into the network")
-parser.add_option("--sequentialFetch", action="store_true", dest="sequentialFetch", default=False, help="Sequentially fetch images for each batch")
-parser.add_option("--randomFetchTest", action="store_true", dest="randomFetchTest", default=False, help="Randomly fetch images for each test batch")
-parser.add_option("--computeMeanImage", action="store_false", dest="computeMeanImage", default=False, help="Compute mean image on data")
+parser.add_option("--imageWidth", action="store", type="int", dest="imageWidth", default=224, help="Image width for feeding into the network")
+parser.add_option("--imageHeight", action="store", type="int", dest="imageHeight", default=224, help="Image height for feeding into the network")
+parser.add_option("--imageChannels", action="store", type="int", dest="imageChannels", default=3, help="Number of channels in the image")
+parser.add_option("--resizeRatio", action="store", type="float", dest="resizeRatio", default=1.15, help="Resizing image ratio")
+parser.add_option("--useImageMean", action="store_true", dest="useImageMean", default=False, help="Use image mean for normalization")
 
 # Trainer Params
 parser.add_option("--learningRate", action="store", type="float", dest="learningRate", default=1e-4, help="Learning rate")
 parser.add_option("--trainingEpochs", action="store", type="int", dest="trainingEpochs", default=10, help="Training epochs")
-parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=60, help="Batch size")
-parser.add_option("--displayStep", action="store", type="int", dest="displayStep", default=5, help="Progress display step")
+parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=5, help="Batch size")
 parser.add_option("--saveStep", action="store", type="int", dest="saveStep", default=1000, help="Progress save step")
-parser.add_option("--evaluateStep", action="store", type="int", dest="evaluateStep", default=10000000, help="Progress evaluation step")
+parser.add_option("--displayStep", action="store", type="int", dest="displayStep", default=5, help="Progress display step")
 
 # Directories
 parser.add_option("--logsDir", action="store", type="string", dest="logsDir", default="./logs", help="Directory for saving logs")
-parser.add_option("--modelDir", action="store", type="string", dest="modelDir", default="./model-inc_res_v2/", help="Directory for saving the model")
-parser.add_option("--modelName", action="store", type="string", dest="modelName", default="inc_res_v2_book", help="Name to be used for saving the model")
+parser.add_option("--modelDir", action="store", type="string", dest="modelDir", default="./mymodel/", help="Directory for saving the model")
+parser.add_option("--modelName", action="store", type="string", dest="modelName", default="mymodel", help="Name to be used for saving the model")
 
-# Network Params
-parser.add_option("--numClasses", action="store", type="int", dest="numClasses", default=30, help="Number of classes")
-parser.add_option("--neuronAliveProbability", action="store", type="float", dest="neuronAliveProbability", default=0.5, help="Probability of keeping a neuron active during training")
+parser.add_option("--trainDataFile", action="store", type="string", dest="trainDataFile", default="/netscratch/siddiqui/CrossLayerPooling/data/opticdisc-labels-train.txt", help="Training data file")
+parser.add_option("--valDataFile", action="store", type="string", dest="valDataFile", default="/netscratch/siddiqui/CrossLayerPooling/data/opticdisc-labels-val.txt", help="Validation data file")
+parser.add_option("--testDataFile", action="store", type="string", dest="testDataFile", default="/netscratch/siddiqui/CrossLayerPooling/data/opticdisc-labels-test.txt", help="Test data file")
 
 # Parse command line options
 (options, args) = parser.parse_args()
 print (options)
 
-if not options.useInceptionModel:
-	options.imageHeight = 224
-	options.imageWidth = 224
-	options.modelDir = "./model-vgg_16/"
-	options.modelName = "./vgg_16_book/"
+baseDir = os.getcwd()
 
-# Import custom data
-import inputReader
-inputReader = inputReader.InputReader(options)
+# Load the model
+if options.model == "ResNet":
+	resnet_checkpoint_file = os.path.join(baseDir, 'resnet_v1_152.ckpt')
+	if not os.path.isfile(resnet_checkpoint_file):
+		# Download file from the link
+		url = 'http://download.tensorflow.org/models/resnet_v1_152_2016_08_28.tar.gz'
+		filename = wget.download(url)
 
-if options.trainModel:
-	with tf.variable_scope('Model'):
-		# Data placeholders
-		inputBatchImages = tf.placeholder(dtype=tf.float32, shape=[None, options.imageHeight,
-											options.imageWidth, options.imageChannels], name="inputBatchImages")
-		inputBatchLabels = tf.placeholder(dtype=tf.float32, shape=[None, options.numClasses], name="inputBatchLabels")
-		inputKeepProbability = tf.placeholder(dtype=tf.float32, name="inputKeepProbability")
+		# Extract the tar file
+		tar = tarfile.open(filename)
+		tar.extractall()
+		tar.close()
 
-	if options.useInceptionModel:
-		with tf.variable_scope('Model'):
-			scaledInputBatchImages = tf.scalar_mul((1.0/255), inputBatchImages)
-			scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
-			scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
+	options.imageHeight = options.imageWidth = 224
+
+elif options.model == "IncResV2":
+	inc_res_v2_checkpoint_file = os.path.join(baseDir, 'inception_resnet_v2_2016_08_30.ckpt')
+	if not os.path.isfile(inc_res_v2_checkpoint_file):
+		# Download file from the link
+		url = 'http://download.tensorflow.org/models/inception_resnet_v2_2016_08_30.tar.gz'
+		filename = wget.download(url)
+
+		# Extract the tar file
+		tar = tarfile.open(filename)
+		tar.extractall()
+		tar.close()
+
+	options.imageHeight = options.imageWidth = 299
+
+elif options.model == "NAS": 
+	nas_checkpoint_file = os.path.join(baseDir, 'model.ckpt.index')
+	if not os.path.isfile(nas_checkpoint_file):
+		# Download file from the link
+		url = 'https://storage.googleapis.com/download.tensorflow.org/models/nasnet-a_large_04_10_2017.tar.gz'
+		filename = wget.download(url)
+
+		# Extract the tar file
+		tar = tarfile.open(filename)
+		tar.extractall()
+		tar.close()
+
+	# Update image sizes
+	options.imageHeight = options.imageWidth = 331
+
+else:
+	print ("Error: Unknown model selected")
+	exit(-1)
+
+# Define params
+IMAGENET_MEAN = [123.68, 116.779, 103.939] # RGB
+
+# Decide the resizing dimensions
+RESIZED_IMAGE_DIMS = [int(options.imageHeight * options.resizeRatio), int(options.imageWidth * options.resizeRatio)]
+print ("Resized image dimensions: %s" % str(RESIZED_IMAGE_DIMS))
+
+# Reads an image from a file, decodes it into a dense tensor
+def _parse_function(filename, label):
+	image_string = tf.read_file(filename)
+	# img = tf.image.decode_image(image_string)
+	img = tf.image.decode_jpeg(image_string)
+
+	if options.trainModel:
+		img = tf.image.resize_images(img, RESIZED_IMAGE_DIMS)
+
+		# Random crop
+		img = tf.random_crop(img, [options.imageHeight, options.imageWidth, options.imageChannels])
+
+		# Random flipping
+		img = tf.image.random_flip_left_right(img)
+		img = tf.image.random_flip_up_down(img)
+
+		# Random image distortions
+		# img = tf.image.random_brightness(img, max_delta=0.1)
+
+	else:
+		img = tf.image.resize_images(img, [options.imageHeight, options.imageWidth])
+
+	img.set_shape([options.imageHeight, options.imageWidth, options.imageChannels])
+	img = tf.cast(img, tf.float32) # Convert to float tensor
+	# print (img.shape)
+	return img, filename, label
+
+# A vector of filenames
+currentDataFile = options.trainDataFile if options.trainModel else options.testDataFile
+print ("Loading data from file: %s" % (currentDataFile))
+dataClasses = []
+with open(currentDataFile) as f:
+	imagesBaseDir = '/netscratch/siddiqui/CrossLayerPooling/data/OpticDiscs/'
+	imageFileNames = f.readlines()
+	imNames = []
+	imLabels = []
+	for imName in imageFileNames:
+		imName = imName.strip().split(' ')
+		imNames.append(os.path.join(imagesBaseDir, imName[0]))
+		imLabels.append(int(imName[1]))
+
+		if int(imName[1]) not in dataClasses:
+			dataClasses.append(int(imName[1]))
+
+	# imageFileNames = [x.strip().split(' ') for x in imageFileNames] # FileName and Label is separated by a space
+	imNames = tf.constant(imNames)
+	imLabels = tf.constant(imLabels)
+
+numClasses = len(dataClasses)
+numFiles = len(imageFileNames)
+print ("Dataset loaded")
+print ("Files: %d | Classes: %d" % (numFiles, numClasses))
+
+dataset = tf.contrib.data.Dataset.from_tensor_slices((imNames, imLabels))
+dataset = dataset.map(_parse_function)
+dataset = dataset.shuffle(buffer_size=numFiles)
+dataset = dataset.batch(options.batchSize)
+
+iterator = dataset.make_initializable_iterator()
+
+with tf.name_scope('Model'):
+	# Data placeholders
+	inputBatchImages, inputBatchImageNames, inputBatchImageLabels = iterator.get_next()
+	inputBatchImageLabels = tf.one_hot(inputBatchImageLabels, depth=numClasses)
+
+	print ("Data shape: %s" % str(inputBatchImages.get_shape()))
+	print ("Labels shape: %s" % str(inputBatchImageLabels.get_shape()))
+
+	if options.model == "IncResV2":
+		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
+		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
+		scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
 
 		# Create model
-		arg_scope = inception_resnet_v2_arg_scope()
+		arg_scope = inception_resnet_v2.inception_resnet_v2_arg_scope()
 		with slim.arg_scope(arg_scope):
-			logits, aux_logits, end_points = inception_resnet_v2(scaledInputBatchImages, inputKeepProbability, options.numClasses, is_training=True)
+			logits, end_points = inception_resnet_v2.inception_resnet_v2(scaledInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
 
-		# Create list of vars to restore before train op
-		variables_to_restore = slim.get_variables_to_restore(include=["InceptionResnetV2"])
+		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
+		variables_to_restore = slim.get_variables_to_restore(exclude=["InceptionResnetV2/Logits", "InceptionResnetV2/AuxLogits"])
 
-	# VGG model
+	elif options.model == "ResNet":
+		if options.useImageMean:
+			imageMean = tf.reduce_mean(inputBatchImages, axis=[1, 2], keep_dims=True)
+			print ("Image mean shape: %s" % str(imageMean.shape))
+			processedInputBatchImages = inputBatchImages - imageMean
+		else:
+			print (inputBatchImages.shape)
+			channels = tf.split(axis=3, num_or_size_splits=options.imageChannels, value=inputBatchImages)
+			for i in range(options.imageChannels):
+				channels[i] -= IMAGENET_MEAN[i]
+			processedInputBatchImages = tf.concat(axis=3, values=channels)
+			print (processedInputBatchImages.shape)
+
+		# Create model
+		arg_scope = resnet_v1.resnet_arg_scope()
+		with slim.arg_scope(arg_scope):
+			logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+
+		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
+		variables_to_restore = slim.get_variables_to_restore(exclude=["resnet_v1_152/Logits", "resnet_v1_152/AuxLogits"])
+
+	elif options.model == "NAS":
+		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
+		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
+		scaledInputBatchImages = tf.multiply(scaledInputBatchImages, 2.0)
+
+		# Create model
+		arg_scope = nasnet.nasnet_large_arg_scope()
+		with slim.arg_scope(arg_scope):
+			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
+			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=False, num_classes=numClasses)
+
+		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
+		variables_to_restore = slim.get_variables_to_restore(exclude=["final_layer/Logits", "aux_1/AuxLogits"])
+
 	else:
-		with slim.arg_scope(vgg_arg_scope()):
-			logits, end_points = vgg_16(inputBatchImages, inputKeepProbability, options.numClasses)
+		print ("Error: Unknown model selected")
+		exit(-1)
 
-		# Create list of vars to restore before train op
-		variables_to_restore = slim.get_variables_to_restore(include=["vgg_16"])
+with tf.name_scope('Loss'):
+	# Define loss
+	cross_entropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchImageLabels, logits=logits)
+	tf.losses.add_loss(cross_entropy_loss)
+	loss = tf.reduce_mean(tf.losses.get_losses())
 
-	# Exclude the 'alpha' variables (parametric_relu)
-	variables_to_restore_new = []
-	for var in variables_to_restore:
-		if "param_relu_alpha" not in var.name:
-			# print (var.name)
-			variables_to_restore_new.append(var)
-	variables_to_restore = variables_to_restore_new
+with tf.name_scope('Accuracy'):
+	correct_predictions = tf.equal(tf.argmax(logits, 1), tf.argmax(inputBatchImageLabels, 1))
+	accuracy = tf.reduce_mean(tf.cast(correct_predictions, tf.float32), name='accuracy')
 
-	with tf.name_scope('Loss'):
-		# Define loss
-		# Reversed from slim.losses.softmax_cross_entropy(logits, labels) => tf.losses.softmax_cross_entropy(labels, logits)
-		cross_entropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchLabels, logits=logits)
-		# cross_entropy_loss = slim.losses.softmax_cross_entropy(logits, inputBatchLabels)
-		# loss = tf.reduce_sum(slim.losses.get_regularization_losses()) + cross_entropy_loss
-		# cross_entropy_loss_aux_logits = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchLabels, logits=aux_logits)
+with tf.name_scope('Optimizer'):
+	# Define Optimizer
+	optimizer = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(loss)
 
-		# tf.add_to_collection('losses', cross_entropy_loss)
-		# loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
-		tf.losses.add_loss(cross_entropy_loss)
-		# tf.losses.add_loss(cross_entropy_loss_aux_logits)
-		loss = tf.reduce_mean(tf.losses.get_losses())
+	# # Op to calculate every variable gradient
+	# gradients = tf.gradients(loss, tf.trainable_variables())
+	# gradients = list(zip(gradients, tf.trainable_variables()))
 
-	with tf.name_scope('Accuracy'):
-		correct_predictions = tf.equal(tf.argmax(end_points['Predictions'], 1), tf.argmax(inputBatchLabels, 1))
-		accuracy = tf.reduce_mean(tf.cast(correct_predictions, tf.float32), name='accuracy')
+	# # Op to update all variables according to their gradient
+	# applyGradients = optimizer.apply_gradients(grads_and_vars=gradients)
 
-	with tf.name_scope('Optimizer'):
-		# Define Optimizer
-		optimizer = tf.train.AdamOptimizer(learning_rate=options.learningRate)
+# Initializing the variables
+init = tf.global_variables_initializer() # TensorFlow v0.11
+init_local = tf.local_variables_initializer()
 
-		# Op to calculate every variable gradient
-		gradients = tf.gradients(loss, tf.trainable_variables())
-		gradients = list(zip(gradients, tf.trainable_variables()))
+if options.tensorboardVisualization:
+	# Create a summary to monitor cost tensor
+	tf.summary.scalar("loss", loss)
 
-		# Op to update all variables according to their gradient
-		applyGradients = optimizer.apply_gradients(grads_and_vars=gradients)
+	# Create summaries to visualize weights
+	for var in tf.trainable_variables():
+		tf.summary.histogram(var.name, var)
+	# # Summarize all gradients
+	# for grad, var in gradients:
+	# 	tf.summary.histogram(var.name + '/gradient', grad)
 
-	# Initializing the variables
-	init = tf.global_variables_initializer() # TensorFlow v0.11
-	init_local = tf.local_variables_initializer()
+	# Merge all summaries into a single op
+	mergedSummaryOp = tf.summary.merge_all()
 
-	if options.tensorboardVisualization:
-		# Create a summary to monitor cost tensor
-		tf.summary.scalar("loss", loss)
+# 'Saver' op to save and restore all the variables
+saver = tf.train.Saver()
 
-		# Create summaries to visualize weights
-		for var in tf.trainable_variables():
-		    tf.summary.histogram(var.name, var)
-		# Summarize all gradients
-		for grad, var in gradients:
-		    tf.summary.histogram(var.name + '/gradient', grad)
-
-		# Merge all summaries into a single op
-		mergedSummaryOp = tf.summary.merge_all()
-
-	# 'Saver' op to save and restore all the variables
-	saver = tf.train.Saver()
-
-	bestLoss = 1e9
-	step = 1
+# GPU config
+config = tf.ConfigProto()
+config.gpu_options.allow_growth=True
 
 # Train model
 if options.trainModel:
-	with tf.Session() as sess:
-		# Initialize all variables
+	with tf.Session(config=config) as sess:
+		# Initialize all vars
 		sess.run(init)
 		sess.run(init_local)
 
+		# Restore the model params
 		if options.startTrainingFromScratch:
 			print ("Removing previous checkpoints and logs")
 			os.system("rm -rf " + options.logsDir)
 			os.system("rm -rf " + options.modelDir)
 			os.system("mkdir " + options.modelDir)
 
-			# Load the pre-trained model
-			restorer = tf.train.Saver(variables_to_restore)
-			if options.useInceptionModel:
-				restorer.restore(sess, inc_res_v2_checkpoint_file)
-			else:
-				restorer.restore(sess, vgg_checkpoint_file)
+			checkpointFileName = resnet_checkpoint_file if options.model == "ResNet" else inc_res_v2_checkpoint_file if options.model == "IncResV2" else nas_checkpoint_file
+			print ("Restoring weights from file: %s" % (checkpointFileName))
 
-		# Restore checkpoint
+			# Load the imagenet pre-trained model
+			restorer = tf.train.Saver(variables_to_restore)
+			restorer.restore(sess, checkpointFileName)
 		else:
-			print ("Restoring from checkpoint")
-			#saver = tf.train.import_meta_graph(options.modelDir + options.modelName + ".meta")
-			saver.restore(sess, options.modelDir + options.modelName)
+			# Load the user trained model
+			restorer = tf.train.Saver(variables_to_restore)
+			restorer.restore(sess, os.path.join(options.modelDir, options.modelName))
 
 		if options.tensorboardVisualization:
-			# Op for writing logs to Tensorboard
+			# Write the graph to file
 			summaryWriter = tf.summary.FileWriter(options.logsDir, graph=tf.get_default_graph())
 
-		print ("Starting network training")
+		for epoch in range(options.trainingEpochs):
+			# Initialize the dataset iterator
+			sess.run(iterator.initializer)
 
-		# Keep training until reach max iterations
-		while True:
-			batchImagesTrain, batchLabelsTrain = inputReader.getTrainBatch()
-			# print ("Batch images shape: %s, Batch labels shape: %s" % (batchImagesTrain.shape, batchLabelsTrain.shape))
+			try:
+				step = 0
+				while True:
+					start_time = time.time()
 
-			# If training iterations completed
-			if batchImagesTrain is None:
-				print ("Training completed")
-				break
+					# Run optimization op (backprop)
+					if options.tensorboardVisualization:
+						[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, optimizer, mergedSummaryOp])
+						summaryWriter.add_summary(summary, step)
+					else:
+						[trainLoss, currentAcc, _] = sess.run([loss, accuracy, optimizer])
 
-			# Run optimization op (backprop)
-			if options.tensorboardVisualization:
-				[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, applyGradients, mergedSummaryOp], feed_dict={inputBatchImages: batchImagesTrain, inputBatchLabels: batchLabelsTrain, inputKeepProbability: options.neuronAliveProbability})
-				# Write logs at every iteration
-				summaryWriter.add_summary(summary, step)
-			else:
-				[trainLoss, currentAcc, _] = sess.run([loss, accuracy, applyGradients], feed_dict={inputBatchImages: batchImagesTrain, inputBatchLabels: batchLabelsTrain, inputKeepProbability: options.neuronAliveProbability})
+					duration = time.time() - start_time
 
-			print ("Iteration: %d, Minibatch Loss: %f, Accuracy: %f" % (step, trainLoss, currentAcc * 100))
-			step += 1
+					# Print an overview fairly often.
+					if step % options.displayStep == 0:
+						print('Step: %d | Loss: %f | Accuracy: %f | Duration: %f' % (step, trainLoss, currentAcc, duration))
+					step += 1
+			except tf.errors.OutOfRangeError:
+				print('Done training for %d epochs, %d steps.' % (epoch, step))
 
-			if step % options.saveStep == 0:
-				# Save model weights to disk
-				saver.save(sess, options.modelDir + options.modelName)
-				print ("Model saved: %s" % (options.modelDir + options.modelName))
+			# Save final model weights to disk
+			saver.save(sess, os.path.join(options.modelDir, options.modelName))
+			print ("Model saved: %s" % (os.path.join(options.modelDir, options.modelName)))
 
-			#Check the accuracy on test data
-			if step % options.evaluateStep == 0:
-				# Report loss on test data
-				batchImagesTest, batchLabelsTest = inputReader.getTestBatch()
-
-				[testLoss, testAcc] = sess.run([loss, accuracy], feed_dict={inputBatchImages: batchImagesTest, inputBatchLabels: batchLabelsTest, inputKeepProbability: 1.0})
-				print ("Test loss: %f, Test Accuracy: %f" % (testLoss, testAcc))
-
-				# #Check the accuracy on test data
-				# if step % options.saveStepBest == 0:
-				# 	# Report loss on test data
-				# 	batchImagesTest, batchLabelsTest = inputReader.getTestBatch()
-				# 	[testLoss] = sess.run([loss], feed_dict={inputBatchImages: batchImagesTest, inputBatchLabels: batchLabelsTest, inputKeepProbability: 1.0})
-				# 	print ("Test loss: %f" % testLoss)
-
-				# 	# If its the best loss achieved so far, save the model
-				# 	if testLoss < bestLoss:
-				# 		bestLoss = testLoss
-				# 		# bestModelSaver.save(sess, best_checkpoint_dir + 'checkpoint.data')
-				# 		bestModelSaver.save(sess, checkpointPrefix, global_step=0, latest_filename=checkpointStateName)
-				# 		print ("Best model saved in file: %s" % checkpointPrefix)
-				# 	else:
-				# 		print ("Previous best accuracy: %f" % bestLoss)
-
-		# Save final model weights to disk
-		saver.save(sess, options.modelDir + options.modelName)
-		print ("Model saved: %s" % (options.modelDir + options.modelName))
-
-		# Report loss on test data
-		batchImagesTest, batchLabelsTest = inputReader.getTestBatch()
-		testLoss = sess.run(loss, feed_dict={inputBatchImages: batchImagesTest, inputBatchLabels: batchLabelsTest, inputKeepProbability: 1.0})
-		print ("Test loss (current): %f" % testLoss)
-
-		print ("Optimization Finished!")
+	print ("Optimization Finished!")
 
 # Test model
 if options.testModel:
 	print ("Testing saved model")
-	computeAccuracyWithoutOtherClass = True
+
 	# Now we make sure the variable is now a constant, and that the graph still produces the expected result.
 	with tf.Session() as session:
-		saver = tf.train.import_meta_graph(options.modelDir + options.modelName + ".meta")
-		saver.restore(session, options.modelDir + options.modelName)
+		saver.restore(session, os.path.join(options.modelDir, options.modelName))
 
-		# Get reference to placeholders
-		predictionsNode = session.graph.get_tensor_by_name("Predictions:0")
-		accuracyNode = session.graph.get_tensor_by_name("Accuracy/accuracy:0")
-		inputBatchImages = session.graph.get_tensor_by_name("Model/inputBatchImages:0")
-		inputBatchLabels = session.graph.get_tensor_by_name("Model/inputBatchLabels:0")
-		inputKeepProbability = session.graph.get_tensor_by_name("Model/inputKeepProbability:0")
+		try:
+			step = 0
+			correctInstances = 0
+			totalInstances = 0
+			while True:
+				start_time = time.time()
+				
+				[batchLabelsTest, predictions, currentAcc] = session.run([inputBatchImageLabels, end_points['Predictions'], accuracy])
+				print('Step: %d | Accuracy: %f | Duration: %f' % (step, currentAcc, duration))
 
-		inputReader.resetTestBatchIndex()
-		accumulatedAccuracy = 0.0
-		numBatches = 0
-		while True:
-			batchImagesTest, batchLabelsTest = inputReader.getTestBatch()
-			if batchLabelsTest is None:
-				break
-			if computeAccuracyWithoutOtherClass:
-				[predictions, accuracy] = session.run([predictionsNode, accuracyNode], feed_dict={inputBatchImages: batchImagesTest, inputBatchLabels: batchLabelsTest, inputKeepProbability: 1.0})
-				print ('Current test batch accuracy (without other): %f' % (accuracy))
-				accumulatedAccuracy += accuracy
-			else:
-				# Consider the prediction to be other class if the prediction confidence is less than 50%
-				predictions = session.run(predictionsNode, feed_dict={inputBatchImages: batchImagesTest, inputKeepProbability: 1.0})
 				predConf = np.max(predictions, axis=1)
 				predClass = np.argmax(predictions, axis=1)
 				actualClass = np.argmax(batchLabelsTest, axis=1)
-				for i in range(predConf.shape[0]):
-					print ("Prediction conf: %f, Predicted class: %d, GT: %d" % (predConf[i], predClass[i], actualClass[i]))
-					if predConf[i] < 0.5:
-						print ("(Low conf) Prediction conf: %f, Predicted class: %d, GT: %d" % (predConf[i], predClass[i], actualClass[i]))
-						predClass[i] = options.numClasses # Others class
-				accuracyWithOtherClass = np.mean(predClass == actualClass)
-				print ('Current test batch accuracy (with other): %f' % (accuracyWithOtherClass))
-				accumulatedAccuracy += accuracyWithOtherClass
 
-			numBatches += 1
+				correctInstances += np.sum(predClass == actualClass)
+				totalInstances += predClass.shape[0]
 
-	accumulatedAccuracy = accumulatedAccuracy / numBatches
-	print ('Cummulative test set accuracy: %f' % (accumulatedAccuracy * 100))
+				duration = time.time() - start_time
 
-	print ("Model tested")
+				# Print an overview fairly often.
+				if step % options.displayStep == 0:
+					print('Step: %d | Loss: %f | Accuracy: %f | Duration: %f' % (step, trainLoss, currentAcc, duration))
+				step += 1
+		except tf.errors.OutOfRangeError:
+			print('Done training for %d epochs, %d steps.' % (epoch, step))
+
+	print ('Number of test images: %d' % (totalInstances))
+	print ('Number of correctly predicted images: %d' % (correctInstances))
+	print ('Test set accuracy: %f' % ((float(correctInstances) / float(totalInstances)) * 100))
