@@ -15,6 +15,8 @@ import inception_resnet_v2
 import resnet_v1
 import nasnet.nasnet as nasnet
 
+from sklearn import svm
+
 TRAIN = 0
 VAL = 1
 TEST = 2
@@ -53,6 +55,7 @@ parser.add_option("--trainingEpochs", action="store", type="int", dest="training
 parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=5, help="Batch size")
 parser.add_option("--saveStep", action="store", type="int", dest="saveStep", default=1000, help="Progress save step")
 parser.add_option("--displayStep", action="store", type="int", dest="displayStep", default=5, help="Progress display step")
+parser.add_option("--trainSVM", action="store_true", dest="trainSVM", default=False, help="Train SVM on top of the features extracted from the trained model")
 
 # Directories
 parser.add_option("--logsDir", action="store", type="string", dest="logsDir", default="./logs", help="Directory for saving logs")
@@ -349,27 +352,47 @@ if options.trainModel:
 			summaryWriter = tf.summary.FileWriter(options.logsDir, graph=tf.get_default_graph())
 
 		globalStep = 0
-		for epoch in range(options.trainingEpochs):
+		numEpochs = options.trainingEpochs + 1 if options.trainSVM else options.trainingEpochs
+		if options.trainSVM:
+			imageNames = []
+			imageLabels = []
+			imageFeatures = []
+
+		for epoch in range(numEpochs):
 			# Initialize the dataset iterator
 			sess.run(trainIterator.initializer)
-
+			isLastEpoch = epoch == options.trainingEpochs
 			try:
 				step = 0
 				while True:
 					start_time = time.time()
 
-					# Run optimization op (backprop)
-					if options.tensorboardVisualization:
-						[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
-						summaryWriter.add_summary(summary, globalStep)
+					if isLastEpoch:
+						# Collect features for SVM
+						[imageName, imageLabel, featureVec] = sess.run([inputBatchImageNames, inputBatchLabels, end_points['global_pool']], feed_dict={datasetSelectionPlaceholder: TRAIN})
+						imageNames.extend(imageName)
+						imageLabels.extend(imageLabel)
+						imageFeatures.extend(np.squeeze(featureVec))
+
+						duration = time.time() - start_time
+
+						# Print an overview fairly often.
+						if step % options.displayStep == 0:
+							print('Step: %d | Duration: %f' % (step, duration))
 					else:
-						[trainLoss, currentAcc, _] = sess.run([loss, accuracy, trainOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+						# Run optimization op (backprop)
+						if options.tensorboardVisualization:
+							[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+							summaryWriter.add_summary(summary, globalStep)
+						else:
+							[trainLoss, currentAcc, _] = sess.run([loss, accuracy, trainOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
 
-					duration = time.time() - start_time
+						duration = time.time() - start_time
 
-					# Print an overview fairly often.
-					if step % options.displayStep == 0:
-						print('Step: %d | Loss: %f | Accuracy: %f | Duration: %f' % (step, trainLoss, currentAcc, duration))
+						# Print an overview fairly often.
+						if step % options.displayStep == 0:
+							print('Step: %d | Loss: %f | Accuracy: %f | Duration: %f' % (step, trainLoss, currentAcc, duration))
+					
 					step += 1
 					globalStep += 1
 
@@ -379,6 +402,25 @@ if options.trainModel:
 		# Save final model weights to disk
 		saver.save(sess, os.path.join(options.modelDir, options.modelName))
 		print ("Model saved: %s" % (os.path.join(options.modelDir, options.modelName)))
+
+		if options.trainSVM:
+			# Train the SVM
+			print ("Training SVM")
+			imageFeatures = np.array(imageFeatures)
+			imageLabels = np.array(imageLabels)
+			print ("Data shape: %s" % str(imageFeatures.shape))
+			print ("Labels shape: %s" % str(imageLabels.shape))
+
+			clf = svm.LinearSVC(C=1.0)
+			clf.fit(imageFeatures, imageLabels)
+			print ("Training Complete!")
+
+			with open(os.path.join(options.modelDir, 'svm.pkl'), 'wb') as fid:
+				cPickle.dump(clf, fid)
+
+			print ("Evaluating performance on training data")
+			trainAccuracy = clf.score(imageFeatures, imageLabels)
+			print ("Train accuracy: %f" % (trainAccuracy))
 
 	print ("Optimization Finished!")
 
@@ -395,14 +437,31 @@ if options.testModel:
 		# Initialize the dataset iterator
 		sess.run(testIterator.initializer)
 
+		svmFound = False
+		if os.path.exists(os.path.join(options.modelDir, 'svm.pkl')):
+			print ("Loading saved SVM instance")
+			with open(os.path.join(options.modelDir, 'svm.pkl'), 'rb') as fid:
+				clf = cPickle.load(fid)
+				if clf is None:
+					print ("Error: Unable to load SVM instance.")
+					exit (-1)
+				svmFound = True
+				print ("SVM instance loaded successfully!")
+
 		try:
 			step = 0
 			correctInstances = 0
 			totalInstances = 0
+
+			if svmFound:
+				correctInstancesSVM = 0
+				imageLabels = []
+				imageFeatures = []
+
 			while True:
 				start_time = time.time()
 				
-				[batchLabelsTest, predictions, currentAcc] = sess.run([inputBatchImageLabels, logits, accuracy], feed_dict={datasetSelectionPlaceholder: TEST})
+				[batchLabelsTest, predictions, currentAcc, featureVec] = sess.run([inputBatchImageLabels, logits, accuracy, end_points['global_pool']], feed_dict={datasetSelectionPlaceholder: TEST})
 
 				predConf = np.max(predictions, axis=1)
 				predClass = np.argmax(predictions, axis=1)
@@ -410,6 +469,10 @@ if options.testModel:
 
 				correctInstances += np.sum(predClass == actualClass)
 				totalInstances += predClass.shape[0]
+
+				if svmFound:
+					imageLabels.extend(actualClass)
+					imageFeatures.extend(np.squeeze(featureVec))
 
 				duration = time.time() - start_time
 				print('Step: %d | Accuracy: %f | Duration: %f' % (step, currentAcc, duration))
@@ -421,3 +484,13 @@ if options.testModel:
 	print ('Number of test images: %d' % (totalInstances))
 	print ('Number of correctly predicted images: %d' % (correctInstances))
 	print ('Test set accuracy: %f' % ((float(correctInstances) / float(totalInstances)) * 100))
+
+	if svmFound:
+		print ("Evaluating SVM")
+		imageFeatures = np.array(imageFeatures)
+		imageLabels = np.array(imageLabels)
+		print ("Data shape: %s" % str(imageFeatures.shape))
+		print ("Labels shape: %s" % str(imageLabels.shape))
+
+		testAccuracy = clf.score(imageFeatures, imageLabels)
+		print ("Test accuracy: %f" % (testAccuracy))
