@@ -102,8 +102,8 @@ elif options.model == "IncResV2":
 	options.imageHeight = options.imageWidth = 299
 
 elif options.model == "NAS": 
-	nas_checkpoint_file = os.path.join(baseDir, 'model.ckpt.index')
-	if not os.path.isfile(nas_checkpoint_file):
+	nas_checkpoint_file = os.path.join(baseDir, 'model.ckpt')
+	if not os.path.isfile(nas_checkpoint_file + '.index'):
 		# Download file from the link
 		url = 'https://storage.googleapis.com/download.tensorflow.org/models/nasnet-a_large_04_10_2017.tar.gz'
 		filename = wget.download(url)
@@ -198,6 +198,8 @@ trainIterator = trainDataset.make_initializable_iterator()
 valIterator = valDataset.make_initializable_iterator()
 testIterator = testDataset.make_initializable_iterator()
 
+global_step = tf.train.get_or_create_global_step()
+
 with tf.name_scope('Model'):
 	# Data placeholders
 	datasetSelectionPlaceholder = tf.placeholder(dtype=tf.int32, shape=(), name='DatasetSelectionPlaceholder')
@@ -239,7 +241,8 @@ with tf.name_scope('Model'):
 		# Create model
 		arg_scope = resnet_v1.resnet_arg_scope()
 		with slim.arg_scope(arg_scope):
-			logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+			# logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+			logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=False, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["resnet_v1_152/logits", "resnet_v1_152/AuxLogits"])
@@ -252,11 +255,11 @@ with tf.name_scope('Model'):
 		# Create model
 		arg_scope = nasnet.nasnet_large_arg_scope()
 		with slim.arg_scope(arg_scope):
-			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
-			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=False, num_classes=numClasses)
+			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
+			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=False, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
-		variables_to_restore = slim.get_variables_to_restore(exclude=["final_layer/Logits", "aux_1/AuxLogits"])
+		variables_to_restore = slim.get_variables_to_restore(exclude=["aux_11/aux_logits/FC", "final_layer/FC"])
 
 	else:
 		print ("Error: Unknown model selected")

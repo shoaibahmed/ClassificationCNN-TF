@@ -7,9 +7,10 @@ Implementation of complete CNN training pipeline in TensorFlow. The data reading
 
 <br/>To initiate the training, use the command:
 ```
-python trainer.py -t -s -v -c --batchSize 10 --trainingEpochs 10 -m IncResV2 --displayStep 1 --weightedSoftmax
+python trainer.py -t -s -v -c --batchSize 10 --trainingEpochs 10 -m NAS --displayStep 1 --weightedSoftmax
+python trainer_v2.py -t -s -v -c --batchSize 10 --trainingEpochs 10 -m NAS --displayStep 1 --weightedSoftmax --trainSVM
 ```
-where -t stands for training, -s for training from scratch, -m defines the model to be used (IncResV2, ResNet, NAS), -c stands for model testing after training, and --weightedSoftmax uses weighted softmax with weights proportional to inverse frequency which helps in dealing with unbalanced classes.
+where -t stands for training, -s for training from scratch, -m defines the model to be used (IncResV2, ResNet, NAS), -c stands for model testing after training, and --weightedSoftmax uses weighted softmax with weights proportional to inverse frequency which helps in dealing with unbalanced classes. Training of SVM on the final feature vector is also possible by passing --trainSVM flag to trainer_v2.py.
 
 <br/>To initiate the testing phase, use the command:
 ```
