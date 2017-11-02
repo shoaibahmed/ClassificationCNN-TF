@@ -213,7 +213,9 @@ with tf.name_scope('Model'):
 		# Create model
 		arg_scope = inception_resnet_v2.inception_resnet_v2_arg_scope()
 		with slim.arg_scope(arg_scope):
-			logits, end_points = inception_resnet_v2.inception_resnet_v2(scaledInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+			# logits, end_points = inception_resnet_v2.inception_resnet_v2(scaledInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+			# logits, end_points = inception_resnet_v2.inception_resnet_v2(scaledInputBatchImages, is_training=True, dropout_keep_prob=0.5 if options.trainModel else 1.0, num_classes=numClasses)
+			logits, end_points = inception_resnet_v2.inception_resnet_v2(scaledInputBatchImages, is_training=False, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["InceptionResnetV2/Logits", "InceptionResnetV2/AuxLogits"])
@@ -237,7 +239,7 @@ with tf.name_scope('Model'):
 			logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
-		variables_to_restore = slim.get_variables_to_restore(exclude=["resnet_v1_152/Logits", "resnet_v1_152/AuxLogits"])
+		variables_to_restore = slim.get_variables_to_restore(exclude=["resnet_v1_152/logits", "resnet_v1_152/AuxLogits"])
 
 	elif options.model == "NAS":
 		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
@@ -259,12 +261,12 @@ with tf.name_scope('Model'):
 
 with tf.name_scope('Loss'):
 	if options.weightedSoftmax:
-		print ("Using weighted softmax")
+		print ("Using weighted cross-entropy loss")
 		# Define the class weightages (weighted softmax)
 		classWeightsTensor = tf.constant(classWeights)
 		classWeights = tf.gather(classWeightsTensor, inputBatchLabels)
 	else:
-		print ("Using unweighted softmax")
+		print ("Using unweighted cross-entropy loss")
 		classWeights = tf.ones_like(inputBatchLabels)
 
 	# Define loss
@@ -286,7 +288,9 @@ with tf.name_scope('Optimizer'):
 	gradients = list(zip(gradients, tf.trainable_variables()))
 
 	# Op to update all variables according to their gradient
-	trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
+	update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS) # Added for batch-norm
+	with tf.control_dependencies(update_ops):
+		trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
 
 # Initializing the variables
 init = tf.global_variables_initializer() # TensorFlow v0.11

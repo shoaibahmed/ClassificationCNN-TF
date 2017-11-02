@@ -17,7 +17,7 @@ python trainer.py -c -batchSize 10 -m IncResV2 --testDataFile ./data-labels-test
 ```
 where -c stands for testing and --testFileName defines the file name to be used for testing.
 
-<br/><b>Note:</b> There seems to be a bug in model reloading at this point. The preferred way at this point is to train and test the model simultainuously by using '-t -c'.
+<br/><b>Note:</b> isTraining is always set to false for models due to tensorflow batch-norm issue.
 
 <br/><br/> Author: <b>Shoaib Ahmed Siddiqui</b>
 <br/> Email: <b>12bscsssiddiqui@seecs.edu.pk</b>
