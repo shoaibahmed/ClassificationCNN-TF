@@ -10,6 +10,7 @@ import os
 import cv2
 import time
 import shutil
+import math
 
 import inception_resnet_v2
 import resnet_v1
@@ -55,7 +56,13 @@ parser.add_option("--trainingEpochs", action="store", type="int", dest="training
 parser.add_option("--batchSize", action="store", type="int", dest="batchSize", default=5, help="Batch size")
 parser.add_option("--saveStep", action="store", type="int", dest="saveStep", default=1000, help="Progress save step")
 parser.add_option("--displayStep", action="store", type="int", dest="displayStep", default=5, help="Progress display step")
+
 parser.add_option("--trainSVM", action="store_true", dest="trainSVM", default=False, help="Train SVM on top of the features extracted from the trained model")
+parser.add_option("--reconstructionRegularizer", action="store_true", dest="reconstructionRegularizer", default=False, help="Add decoder at the end for reconstruction of the original input signal")
+parser.add_option("--reconstructionRegularizationLambda", action="store", type="float", dest="reconstructionRegularizationLambda", default=1e-4, help="Reconstruction regularization parameter")
+parser.add_option("--l2Regularizer", action="store_true", dest="l2Regularizer", default=False, help="Add L2 regularization on the final feature vector obtained after global pool")
+parser.add_option("--l2RegularizationLambda", action="store", type="float", dest="l2RegularizationLambda", default=1e-4, help="L2 regularization parameter")
+parser.add_option("--decoderNumFilters", action="store", type="int", dest="decoderNumFilters", default=64, help="Number of filters in the decoder layers")
 
 # Directories
 parser.add_option("--logsDir", action="store", type="string", dest="logsDir", default="./logs", help="Directory for saving logs")
@@ -200,6 +207,109 @@ testIterator = testDataset.make_initializable_iterator()
 
 global_step = tf.train.get_or_create_global_step()
 
+def getShapeAsList(tensor):
+	tensorShape = tensor.get_shape()
+	shapeList = [-1]
+	for val in tensorShape[1:]:
+		shapeList.append(int(val))
+	return shapeList
+
+def lrelu_func(x, leak = 0.2):
+	return tf.maximum(x, leak * x)
+
+def getDeconvFilter(f_shape):
+	width = f_shape[0]
+	height = f_shape[1]
+	f = math.ceil(width/2.0)
+	c = (2 * f - 1 - f % 2) / (2.0 * f)
+	bilinear = np.zeros([f_shape[0], f_shape[1]])
+	for x in range(width):
+		for y in range(height):
+			value = (1 - abs(x / f - c)) * (1 - abs(y / f - c))
+			bilinear[x, y] = value
+	weights = np.zeros(f_shape)
+	for i in range(f_shape[2]):
+		weights[:, :, i, i] = bilinear
+
+	init = tf.constant_initializer(value=weights,
+									dtype=tf.float32)
+	return tf.get_variable(name="up_filter", initializer=init,
+							shape=weights.shape)
+
+def upscoreLayer(bottom, shape, num_outputs, name, 
+				num_in_features, activation=lrelu_func,
+				ksize=4, stride=2):
+	strides = [1, stride, stride, 1]
+	with tf.variable_scope(name):
+		# in_features = bottom.get_shape()[3].value
+		in_features = num_in_features
+
+		if shape is None:
+			# Compute shape out of Bottom
+			in_shape = tf.shape(bottom)
+			# h = ((in_shape[1] - 1) * stride) + 1
+			# w = ((in_shape[2] - 1) * stride) + 1
+			h = in_shape[1] * stride
+			w = in_shape[2] * stride
+			new_shape = [in_shape[0], h, w, num_outputs]
+		else:
+			new_shape = [shape[0], shape[1], shape[2], num_outputs]
+		output_shape = tf.stack(new_shape)
+
+		f_shape = [ksize, ksize, num_outputs, in_features]
+
+		# create
+		num_input = ksize * ksize * in_features / stride
+		stddev = (2 / num_input)**0.5
+
+		weights = getDeconvFilter(f_shape)
+		deconv = tf.nn.conv2d_transpose(bottom, weights, output_shape,
+										strides=strides, padding='SAME')
+
+		# Set the shape to make it more specific
+		deconv.set_shape([None, int(bottom.get_shape()[1] * stride), int(bottom.get_shape()[2] * stride), num_outputs])
+
+		if activation is not None:
+			deconv = activation(deconv)
+
+	return deconv
+
+def decoderModule(featureVec, requiredShape):
+	# Keep adding layers until the output is equal or exceeds the required output size
+	# Reshape the input
+	output = tf.reshape(featureVec, shape=[-1, 1, 1, int(featureVec.get_shape()[1])])
+	currentDataShape = getShapeAsList(output)
+	layerIdx = 1
+	convTransposeStride = 2
+	print ("Feature vector shape: %s | Decoder input shape: %s | Required shape: %s" % (featureVec.get_shape(), output.get_shape(), requiredShape))
+	
+	while True:
+		currentDataShape = getShapeAsList(output)
+
+		# Check if the size exceeds or is equal
+		if (currentDataShape[1] >= requiredShape[1]) and (currentDataShape[2] >= requiredShape[2]):
+			if (currentDataShape[1] > requiredShape[1]) and (currentDataShape[2] > requiredShape[2]):
+				# Crop the requied sized region
+				# output = tf.image.crop_to_bounding_box(image=output, offset_height=0, offset_width=0, target_height=requiredShape[1], target_width=requiredShape[2])
+				output = output[:, :requiredShape[1], :requiredShape[2], :]
+				print ("Decoder cropped output shape: %s" % (output.get_shape()))
+
+			# Add the final convolutional layer to match the output channels
+			output = tf.layers.conv2d(inputs=output, filters=requiredShape[3], kernel_size=(3, 3), strides=(1, 1), padding='SAME', activation=None, name='Decoder_Logits')
+			print ("Decoder Logits shape: %s" % (output.get_shape()))
+			break
+		else:
+			# Add the deconvolutional layer
+			output = upscoreLayer(output, shape=None, num_outputs=options.decoderNumFilters, num_in_features=currentDataShape[3], name='Upscore_' + str(layerIdx), stride=convTransposeStride)
+			print ("Upscore-%d layer output shape: %s" % (layerIdx, output.get_shape()))
+
+		layerIdx += 1
+	
+	# Assertion for output size
+	outputShape = output.get_shape()
+	assert((outputShape[1] == requiredShape[1]) and (outputShape[2] == requiredShape[2]) and (outputShape[3] == requiredShape[3]))
+	return output
+
 with tf.name_scope('Model'):
 	# Data placeholders
 	datasetSelectionPlaceholder = tf.placeholder(dtype=tf.int32, shape=(), name='DatasetSelectionPlaceholder')
@@ -255,8 +365,8 @@ with tf.name_scope('Model'):
 		# Create model
 		arg_scope = nasnet.nasnet_large_arg_scope()
 		with slim.arg_scope(arg_scope):
-			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
-			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=False, num_classes=numClasses)
+			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=False, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["aux_11/aux_logits/FC", "final_layer/FC"])
@@ -264,6 +374,16 @@ with tf.name_scope('Model'):
 	else:
 		print ("Error: Unknown model selected")
 		exit(-1)
+
+	# Add the decoder
+	if options.reconstructionRegularizer:
+		with tf.name_scope('Decoder'):
+			print ("Adding the Decoder network")
+			reconstructedInput = decoderModule(end_points['global_pool'], getShapeAsList(inputBatchImages))
+
+			if options.tensorboardVisualization:
+				tf.summary.image('Original Image', inputBatchImages, max_outputs=3)
+				tf.summary.image('Reconstructed Image', reconstructedInput, max_outputs=3)
 
 with tf.name_scope('Loss'):
 	if options.weightedSoftmax:
@@ -278,6 +398,17 @@ with tf.name_scope('Loss'):
 	# Define loss
 	cross_entropy_loss = tf.losses.softmax_cross_entropy(onehot_labels=inputBatchImageLabels, logits=logits, weights=classWeights, label_smoothing=options.labelSmoothing)
 	tf.losses.add_loss(cross_entropy_loss)
+
+	# Add L2 loss on the feature vector
+	if options.l2Regularizer:
+		l2_reg = options.l2RegularizationLambda * tf.reduce_sum(end_points['global_pool'])
+		tf.losses.add_loss(l2_reg)
+	
+	# Add decoder loss
+	if options.reconstructionRegularizer:
+		reconstruction_loss = options.reconstructionRegularizationLambda * tf.reduce_mean(tf.square(reconstructedInput - inputBatchImages))
+		tf.losses.add_loss(reconstruction_loss)
+
 	loss = tf.reduce_mean(tf.losses.get_losses())
 
 with tf.name_scope('Accuracy'):
@@ -294,17 +425,23 @@ with tf.name_scope('Optimizer'):
 	gradients = list(zip(gradients, tf.trainable_variables()))
 
 	# Op to update all variables according to their gradient
-	update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS) # Added for batch-norm
-	with tf.control_dependencies(update_ops):
-		trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
+	trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
+	# update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS) # Added for batch-norm
+	# with tf.control_dependencies(update_ops):
+	# 	trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
 
 # Initializing the variables
-init = tf.global_variables_initializer() # TensorFlow v0.11
+init = tf.global_variables_initializer()
 init_local = tf.local_variables_initializer()
 
 if options.tensorboardVisualization:
 	# Create a summary to monitor cost tensor
 	tf.summary.scalar("loss", loss)
+	tf.summary.scalar("accuracy", accuracy)
+	if options.l2Regularizer:
+		tf.summary.scalar("l2 regularization loss", l2_reg)
+	if options.reconstructionRegularizer:
+		tf.summary.scalar("reconstruction loss", reconstruction_loss)
 
 	# Create summaries to visualize weights
 	for var in tf.trainable_variables():

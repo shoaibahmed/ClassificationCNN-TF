@@ -252,8 +252,8 @@ with tf.name_scope('Model'):
 		# Create model
 		arg_scope = nasnet.nasnet_large_arg_scope()
 		with slim.arg_scope(arg_scope):
-			# logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=options.trainModel, is_batchnorm_training=options.trainModel, num_classes=numClasses)
-			logits, end_points = nasnet.build_nasnet_large(scaledInputBatchImages, is_training=False, is_batchnorm_training=False, num_classes=numClasses)
+			# logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=options.trainModel, num_classes=numClasses)
+			logits, end_points = resnet_v1.resnet_v1_152(processedInputBatchImages, is_training=False, num_classes=numClasses)
 
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["aux_11/aux_logits/FC", "final_layer/FC"])
@@ -291,9 +291,10 @@ with tf.name_scope('Optimizer'):
 	gradients = list(zip(gradients, tf.trainable_variables()))
 
 	# Op to update all variables according to their gradient
-	update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS) # Added for batch-norm
-	with tf.control_dependencies(update_ops):
-		trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
+	trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
+	# update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS) # Added for batch-norm
+	# with tf.control_dependencies(update_ops):
+	# 	trainOp = optimizer.apply_gradients(grads_and_vars=gradients)
 
 # Initializing the variables
 init = tf.global_variables_initializer() # TensorFlow v0.11
