@@ -303,6 +303,7 @@ init_local = tf.local_variables_initializer()
 if options.tensorboardVisualization:
 	# Create a summary to monitor cost tensor
 	tf.summary.scalar("loss", loss)
+	tf.summary.scalar("accuracy", accuracy)
 
 	# Create summaries to visualize weights
 	for var in tf.trainable_variables():

@@ -78,6 +78,7 @@ parser.add_option("--testDataFile", action="store", type="string", dest="testDat
 print (options)
 
 baseDir = os.getcwd()
+usingGlobalPooledFeatures = False
 
 # Load the model
 if options.model == "ResNet":
@@ -277,7 +278,10 @@ def upscoreLayer(bottom, shape, num_outputs, name,
 def decoderModule(featureVec, requiredShape):
 	# Keep adding layers until the output is equal or exceeds the required output size
 	# Reshape the input
-	output = tf.reshape(featureVec, shape=[-1, 1, 1, int(featureVec.get_shape()[1])])
+	if usingGlobalPooledFeatures:
+		output = tf.reshape(featureVec, shape=[-1, 1, 1, int(featureVec.get_shape()[1])])
+	else:
+		output = featureVec
 	currentDataShape = getShapeAsList(output)
 	layerIdx = 1
 	convTransposeStride = 2
@@ -289,14 +293,15 @@ def decoderModule(featureVec, requiredShape):
 		# Check if the size exceeds or is equal
 		if (currentDataShape[1] >= requiredShape[1]) and (currentDataShape[2] >= requiredShape[2]):
 			if (currentDataShape[1] > requiredShape[1]) and (currentDataShape[2] > requiredShape[2]):
-				# Crop the requied sized region
-				# output = tf.image.crop_to_bounding_box(image=output, offset_height=0, offset_width=0, target_height=requiredShape[1], target_width=requiredShape[2])
-				output = output[:, :requiredShape[1], :requiredShape[2], :]
+				# Get the cenral crop
+				startingOffset = [int((output.get_shape()[1] - requiredShape[1]) / 2), int((output.get_shape()[2] - requiredShape[2]) / 2)]
+				output = output[:, startingOffset[0] : startingOffset[0] + requiredShape[1], startingOffset[1] : startingOffset[1] + requiredShape[2], :]
 				print ("Decoder cropped output shape: %s" % (output.get_shape()))
 
 			# Add the final convolutional layer to match the output channels
 			output = tf.layers.conv2d(inputs=output, filters=requiredShape[3], kernel_size=(3, 3), strides=(1, 1), padding='SAME', activation=None, name='Decoder_Logits')
 			print ("Decoder Logits shape: %s" % (output.get_shape()))
+
 			break
 		else:
 			# Add the deconvolutional layer
@@ -335,6 +340,9 @@ with tf.name_scope('Model'):
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["InceptionResnetV2/Logits", "InceptionResnetV2/AuxLogits"])
 
+		# Last layer for extraction of features before global pool
+		featureVector = end_points['Mixed_7a']
+
 	elif options.model == "ResNet":
 		if options.useImageMean:
 			imageMean = tf.reduce_mean(inputBatchImages, axis=[1, 2], keep_dims=True)
@@ -357,6 +365,9 @@ with tf.name_scope('Model'):
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["resnet_v1_152/logits", "resnet_v1_152/AuxLogits"])
 
+		# Last layer for extraction of features before global pool
+		featureVector = end_points['block4']
+
 	elif options.model == "NAS":
 		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
 		scaledInputBatchImages = tf.subtract(scaledInputBatchImages, 0.5)
@@ -371,15 +382,19 @@ with tf.name_scope('Model'):
 		# Create list of vars to restore before train op (exclude the logits due to change in number of classes)
 		variables_to_restore = slim.get_variables_to_restore(exclude=["aux_11/aux_logits/FC", "final_layer/FC"])
 
+		# Last layer for extraction of features before global pool
+		featureVector = end_points['Cell_17']
+
 	else:
 		print ("Error: Unknown model selected")
 		exit(-1)
 
+	print ("Feature Vector Dimensions: %s" % str(featureVector.get_shape()))
 	# Add the decoder
 	if options.reconstructionRegularizer:
 		with tf.name_scope('Decoder'):
 			print ("Adding the Decoder network")
-			reconstructedInput = decoderModule(end_points['global_pool'], getShapeAsList(inputBatchImages))
+			reconstructedInput = decoderModule(featureVector, getShapeAsList(inputBatchImages))
 
 			if options.tensorboardVisualization:
 				tf.summary.image('Original Image', inputBatchImages, max_outputs=3)
@@ -409,7 +424,7 @@ with tf.name_scope('Loss'):
 		reconstruction_loss = options.reconstructionRegularizationLambda * tf.reduce_mean(tf.square(reconstructedInput - inputBatchImages))
 		tf.losses.add_loss(reconstruction_loss)
 
-	loss = tf.reduce_mean(tf.losses.get_losses())
+	loss = tf.reduce_sum(tf.losses.get_losses())
 
 with tf.name_scope('Accuracy'):
 	correct_predictions = tf.equal(tf.argmax(logits, 1), tf.argmax(inputBatchImageLabels, 1))
@@ -417,8 +432,9 @@ with tf.name_scope('Accuracy'):
 
 with tf.name_scope('Optimizer'):
 	# Define Optimizer
-	# trainOp = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(loss)
 	optimizer = tf.train.AdamOptimizer(learning_rate=options.learningRate)
+	if options.reconstructionRegularizer:
+		autoEncoderTrainOp = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(reconstruction_loss)
 
 	# Op to calculate every variable gradient
 	gradients = tf.gradients(loss, tf.trainable_variables())
@@ -437,6 +453,7 @@ init_local = tf.local_variables_initializer()
 if options.tensorboardVisualization:
 	# Create a summary to monitor cost tensor
 	tf.summary.scalar("loss", loss)
+	tf.summary.scalar("cross-entropy loss", cross_entropy_loss)
 	tf.summary.scalar("accuracy", accuracy)
 	if options.l2Regularizer:
 		tf.summary.scalar("l2 regularization loss", l2_reg)
@@ -509,10 +526,10 @@ if options.trainModel:
 
 					if isLastEpoch:
 						# Collect features for SVM
-						[imageName, imageLabel, featureVec] = sess.run([inputBatchImageNames, inputBatchLabels, end_points['global_pool']], feed_dict={datasetSelectionPlaceholder: TRAIN})
+						[imageName, imageLabel, featureVec] = sess.run([inputBatchImageNames, inputBatchLabels, featureVector], feed_dict={datasetSelectionPlaceholder: TRAIN})
 						imageNames.extend(imageName)
 						imageLabels.extend(imageLabel)
-						imageFeatures.extend(np.squeeze(featureVec))
+						imageFeatures.extend(np.reshape(featureVec, [featureVec.shape[0], -1]))
 
 						duration = time.time() - start_time
 
@@ -522,7 +539,8 @@ if options.trainModel:
 					else:
 						# Run optimization op (backprop)
 						if options.tensorboardVisualization:
-							[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+							# [trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+							[trainLoss, currentAcc, _, summary] = sess.run([reconstruction_loss, accuracy, autoEncoderTrainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
 							summaryWriter.add_summary(summary, globalStep)
 						else:
 							[trainLoss, currentAcc, _] = sess.run([loss, accuracy, trainOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
@@ -601,7 +619,7 @@ if options.testModel:
 			while True:
 				start_time = time.time()
 				
-				[batchLabelsTest, predictions, currentAcc, featureVec] = sess.run([inputBatchImageLabels, logits, accuracy, end_points['global_pool']], feed_dict={datasetSelectionPlaceholder: TEST})
+				[batchLabelsTest, predictions, currentAcc, featureVec] = sess.run([inputBatchImageLabels, logits, accuracy, featureVector], feed_dict={datasetSelectionPlaceholder: TEST})
 
 				predConf = np.max(predictions, axis=1)
 				predClass = np.argmax(predictions, axis=1)
@@ -612,7 +630,7 @@ if options.testModel:
 
 				if svmFound:
 					imageLabels.extend(actualClass)
-					imageFeatures.extend(np.squeeze(featureVec))
+					imageFeatures.extend(np.reshape(featureVec, [featureVec.shape[0], -1]))
 
 				duration = time.time() - start_time
 				print('Step: %d | Accuracy: %f | Duration: %f' % (step, currentAcc, duration))
