@@ -433,8 +433,8 @@ with tf.name_scope('Accuracy'):
 with tf.name_scope('Optimizer'):
 	# Define Optimizer
 	optimizer = tf.train.AdamOptimizer(learning_rate=options.learningRate)
-	if options.reconstructionRegularizer:
-		autoEncoderTrainOp = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(reconstruction_loss)
+	# if options.reconstructionRegularizer:
+	# 	autoEncoderTrainOp = tf.train.AdamOptimizer(learning_rate=options.learningRate).minimize(reconstruction_loss)
 
 	# Op to calculate every variable gradient
 	gradients = tf.gradients(loss, tf.trainable_variables())
@@ -539,8 +539,8 @@ if options.trainModel:
 					else:
 						# Run optimization op (backprop)
 						if options.tensorboardVisualization:
-							# [trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
-							[trainLoss, currentAcc, _, summary] = sess.run([reconstruction_loss, accuracy, autoEncoderTrainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+							[trainLoss, currentAcc, _, summary] = sess.run([loss, accuracy, trainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
+							# [trainLoss, currentAcc, _, summary] = sess.run([reconstruction_loss, accuracy, autoEncoderTrainOp, mergedSummaryOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
 							summaryWriter.add_summary(summary, globalStep)
 						else:
 							[trainLoss, currentAcc, _] = sess.run([loss, accuracy, trainOp], feed_dict={datasetSelectionPlaceholder: TRAIN})
