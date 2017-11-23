@@ -171,12 +171,13 @@ def loadDataset(currentDataFile):
 		for imName in imageFileNames:
 			imName = imName.strip().split(' ')
 			imNames.append(os.path.join(imagesBaseDir, imName[0]))
-			imLabels.append(int(imName[1]))
+			currentLabel = int(imName[1])
+			imLabels.append(currentLabel)
 
-			if int(imName[1]) not in dataClasses:
-				dataClasses[int(imName[1])] = 1
+			if currentLabel not in dataClasses:
+				dataClasses[currentLabel] = 1
 			else:
-				dataClasses[int(imName[1])] += 1
+				dataClasses[currentLabel] += 1
 
 		# imageFileNames = [x.strip().split(' ') for x in imageFileNames] # FileName and Label is separated by a space
 		imNames = tf.constant(imNames)
