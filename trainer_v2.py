@@ -367,7 +367,7 @@ with tf.name_scope('Model'):
 		variables_to_restore = slim.get_variables_to_restore(exclude=["resnet_v1_152/logits", "resnet_v1_152/AuxLogits"])
 
 		# Last layer for extraction of features before global pool
-		featureVector = end_points['block4']
+		featureVector = end_points['resnet_v1_152/block4']
 
 	elif options.model == "NAS":
 		scaledInputBatchImages = tf.scalar_mul((1.0 / 255.0), inputBatchImages)
